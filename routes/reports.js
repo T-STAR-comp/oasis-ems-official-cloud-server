@@ -1,0 +1,1014 @@
+import express from 'express';
+import PDFDocument from 'pdfkit';
+import xlsx from 'xlsx';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import db from '../db/database.js';
+import { authenticateToken, ensureClassAccess } from '../middleware/auth.js';
+import { rankStudentsByExam, getGrade, formatRank, calculateStudentResults, getGradeCriteria } from '../utils/grading.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const router = express.Router();
+
+router.use(authenticateToken);
+
+function resolveLogoPath(logo) {
+  if (!logo) return null;
+  const cleanPath = String(logo).replace(/^\/+/, '');
+  const uploadsRoot = process.env.OASIS_UPLOADS_DIR
+    ? path.resolve(process.env.OASIS_UPLOADS_DIR)
+    : path.join(__dirname, '..', 'uploads');
+
+  // New desktop-safe storage location: userData/uploads
+  if (cleanPath.startsWith('uploads/')) {
+    const uploadsRelative = cleanPath.slice('uploads/'.length);
+    const uploadsAbsolute = path.join(uploadsRoot, uploadsRelative);
+    if (fs.existsSync(uploadsAbsolute)) return uploadsAbsolute;
+  }
+
+  // Backward compatibility for legacy paths under server directory.
+  const legacyAbsolute = path.join(__dirname, '..', cleanPath);
+  return fs.existsSync(legacyAbsolute) ? legacyAbsolute : null;
+}
+
+function parseImageDataUrl(value) {
+  const raw = String(value || '').trim();
+  const match = raw.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\r\n]+)$/i);
+  if (!match) return null;
+  try {
+    return {
+      mimeType: match[1].toLowerCase(),
+      buffer: Buffer.from(match[2], 'base64'),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function drawHeadteacherSignature(doc, signatureValue, x, y, width) {
+  const value = String(signatureValue || '').trim();
+  doc.fillColor('#4a5a70').font('Helvetica').fontSize(10).text('Head Teacher Signature:', x, y);
+
+  const parsedImage = parseImageDataUrl(value);
+  if (parsedImage && ['image/png', 'image/jpeg', 'image/jpg'].includes(parsedImage.mimeType)) {
+    try {
+      doc.image(parsedImage.buffer, x, y + 14, { fit: [Math.max(80, width - 8), 18], align: 'left' });
+      return;
+    } catch {
+      // Fall through to text rendering.
+    }
+  }
+
+  const fallbackText = /^data:image\//i.test(value)
+    ? '____________________'
+    : (value || '____________________');
+  doc.fillColor('#0f172a').font('Helvetica').fontSize(10).text(fallbackText, x, y + 14, {
+    width: Math.max(80, width - 8),
+    ellipsis: true,
+  });
+}
+
+function drawCard(doc, x, y, width, height) {
+  doc.save();
+  doc.roundedRect(x, y, width, height, 10);
+  doc.fillAndStroke('#ffffff', '#d9dee7');
+  doc.restore();
+}
+
+function drawRowBackground(doc, x, y, width, height, color = '#ffffff') {
+  doc.save();
+  doc.rect(x, y, width, height).fill(color);
+  doc.restore();
+}
+
+function formatOneDecimal(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num.toFixed(1) : '-';
+}
+
+function formatPoints(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? String(Math.round(num)) : '-';
+}
+
+function isEnglishSubject(row) {
+  const code = String(row?.subject_code || '').trim().toUpperCase();
+  const name = String(row?.subject_name || '').trim().toLowerCase();
+  return code === 'ENG' || name === 'english';
+}
+
+function isPassingRow(row, gradingSystem) {
+  if (!row) return false;
+  if (gradingSystem === 'msce') {
+    const points = Number(row.points);
+    return Number.isFinite(points) ? points <= 7 : false;
+  }
+  const grade = String(row.grade || '').trim().toUpperCase();
+  if (grade === 'F') return false;
+  const remark = String(row.remark || '').trim().toLowerCase();
+  if (remark.includes('fail')) return false;
+  return true;
+}
+
+function getMerePassGrade(system) {
+  const criteria = getGradeCriteria(system);
+  const passingRows = criteria.filter((row) => {
+    const grade = String(row?.grade || '').trim().toUpperCase();
+    const remark = String(row?.remark || '').trim().toLowerCase();
+    if (system === 'msce') {
+      const points = Number(row?.points);
+      if (Number.isFinite(points) && points <= 7) return true;
+    }
+    return grade !== 'F' && !remark.includes('fail');
+  });
+
+  if (!passingRows.length) {
+    return system === 'msce'
+      ? { grade: '7', points: 7, remark: 'Pass (English requirement)' }
+      : { grade: 'D', points: null, remark: 'Pass (English requirement)' };
+  }
+
+  const merePass = system === 'msce'
+    ? passingRows.reduce((worst, row) => (Number(row.points) > Number(worst.points) ? row : worst))
+    : passingRows.reduce((worst, row) => (Number(row.min_score) < Number(worst.min_score) ? row : worst));
+
+  return {
+    grade: merePass.grade,
+    points: merePass.points ?? null,
+    remark: merePass.remark || 'Pass (English requirement)',
+  };
+}
+
+function getOverallGradeWithEnglishRule(exam, averageScore, results) {
+  const base = getGrade(averageScore, exam.grading_system);
+  const englishRow = Array.isArray(results) ? results.find(isEnglishSubject) : null;
+  if (!englishRow) return base;
+  const englishPassed = isPassingRow(englishRow, exam.grading_system);
+  if (!englishPassed) {
+    return exam.grading_system === 'msce'
+    ? { grade: '9', points: 9, remark: 'Fail (English requirement)' }
+    : { grade: 'F', points: null, remark: 'Fail (English requirement)' };
+  }
+  if (isPassingRow(base, exam.grading_system)) return base;
+  return getMerePassGrade(exam.grading_system);
+}
+
+function getPassFailRemark(exam, results = []) {
+  const rows = Array.isArray(results) ? results : [];
+  const passedSubjects = rows.filter((row) => isPassingRow(row, exam.grading_system)).length;
+  const englishRow = rows.find(isEnglishSubject);
+  const englishPassed = isPassingRow(englishRow, exam.grading_system);
+  const passed = englishPassed && passedSubjects >= 6;
+  if (passed) {
+    return { status: 'Pass', detail: 'Pass (minimum 6 subjects including English met)' };
+  }
+  return { status: 'Fail', detail: 'Fail (must pass English and at least 6 subjects)' };
+}
+
+function buildSubjectRankMaps(scoreRows) {
+  const bySubject = new Map();
+
+  for (const row of scoreRows) {
+    if (!bySubject.has(row.subject_id)) {
+      bySubject.set(row.subject_id, []);
+    }
+    bySubject.get(row.subject_id).push(row);
+  }
+
+  const rankMaps = new Map();
+  for (const [subjectId, rows] of bySubject.entries()) {
+    rows.sort((a, b) => b.score - a.score);
+    const rankMap = new Map();
+    let currentRank = 1;
+    let previousScore = null;
+
+    rows.forEach((row, index) => {
+      if (previousScore === null || row.score !== previousScore) {
+        currentRank = index + 1;
+      }
+      rankMap.set(row.student_id, currentRank);
+      previousScore = row.score;
+    });
+
+    rankMaps.set(subjectId, rankMap);
+  }
+
+  return rankMaps;
+}
+
+// Get student report card data
+router.get('/student/:studentId/exam/:examId', (req, res) => {
+  const { studentId, examId } = req.params;
+
+  const student = db.prepare('SELECT * FROM students WHERE id = ?').get(studentId);
+  if (!student) {
+    return res.status(404).json({ error: 'Student not found' });
+  }
+
+  const exam = db.prepare(`
+    SELECT e.*, c.name as class_name, c.year as class_year,
+           ce.name as component_exam_name
+    FROM exams e
+    JOIN classes c ON e.class_id = c.id
+    LEFT JOIN exams ce ON e.component_exam_id = ce.id
+    WHERE e.id = ?
+  `).get(examId);
+
+  if (!exam) {
+    return res.status(404).json({ error: 'Exam not found' });
+  }
+  if (!ensureClassAccess(req, res, exam.class_id)) return;
+
+  const calculated = calculateStudentResults(examId, studentId);
+  const results = calculated.results
+    .slice()
+    .sort((a, b) => (a.subject_name || '').localeCompare(b.subject_name || ''));
+
+  const rankings = rankStudentsByExam(examId);
+  const studentRanking = rankings.find(r => r.student.id === studentId);
+
+  const schoolInfo = db.prepare('SELECT * FROM school_info WHERE id = 1').get();
+
+  const totalScore = calculated.totalScore;
+  const averageScore = calculated.averageScore;
+  const overallGrade = getOverallGradeWithEnglishRule(exam, averageScore, results);
+  const passFail = getPassFailRemark(exam, results);
+
+  res.json({
+    reportCard: {
+      school: schoolInfo,
+      student,
+      exam,
+      weighting: {
+        componentExamName: exam.component_exam_name || null,
+        componentWeight: Number(exam.component_weight || 0),
+        currentWeight: Number(exam.current_weight || 100)
+      },
+      results,
+      summary: {
+        totalScore,
+        averageScore: Number(averageScore.toFixed(1)),
+        rank: studentRanking?.rank || 0,
+        totalStudents: rankings.length,
+        overallGrade: overallGrade.grade,
+        overallRemark: passFail.status,
+        overallRemarkDetail: passFail.detail
+      }
+    }
+  });
+});
+
+// Download student report card as PDF
+router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
+  const { studentId, examId } = req.params;
+
+  const student = db.prepare('SELECT * FROM students WHERE id = ?').get(studentId);
+  if (!student) {
+    return res.status(404).json({ error: 'Student not found' });
+  }
+
+  const exam = db.prepare(`
+    SELECT e.*, c.name as class_name, c.year as class_year,
+           ce.name as component_exam_name
+    FROM exams e
+    JOIN classes c ON e.class_id = c.id
+    LEFT JOIN exams ce ON e.component_exam_id = ce.id
+    WHERE e.id = ?
+  `).get(examId);
+
+  if (!exam) {
+    return res.status(404).json({ error: 'Exam not found' });
+  }
+  if (!ensureClassAccess(req, res, exam.class_id)) return;
+
+  const calculated = calculateStudentResults(examId, studentId);
+  const results = calculated.results
+    .slice()
+    .sort((a, b) => (a.subject_name || '').localeCompare(b.subject_name || ''));
+
+  const rankings = rankStudentsByExam(examId);
+  const studentRanking = rankings.find(r => r.student.id === studentId);
+  const schoolInfo = db.prepare('SELECT * FROM school_info WHERE id = 1').get();
+  const logoPath = resolveLogoPath(schoolInfo?.logo);
+
+  const allScores = [];
+  rankings.forEach((entry) => {
+    const r = calculateStudentResults(examId, entry.student.id);
+    r.results.forEach((subjectRow) => {
+      allScores.push({
+        student_id: entry.student.id,
+        subject_id: subjectRow.subject_id,
+        score: subjectRow.score
+      });
+    });
+  });
+  const subjectRankMaps = buildSubjectRankMaps(allScores);
+
+  const criteria = db.prepare(`
+    SELECT grade, min_score, max_score, points, remark
+    FROM grade_criteria
+    WHERE system = ?
+    ORDER BY min_score DESC
+  `).all(exam.grading_system);
+  const classSubjects = db.prepare(`
+    SELECT id, teacher_name
+    FROM subjects
+    WHERE class_id = ?
+  `).all(exam.class_id);
+  const subjectTeacherMap = new Map(classSubjects.map((row) => [row.id, row.teacher_name || '']));
+
+  const totalScore = calculated.totalScore;
+  const averageScore = calculated.averageScore;
+  const overallGrade = getOverallGradeWithEnglishRule(exam, averageScore, results);
+  const passFail = getPassFailRemark(exam, results);
+
+  const doc = new PDFDocument({ margin: 24, size: 'A4' });
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${student.name.replace(/\s+/g, '_')}_report_card.pdf"`);
+
+  doc.pipe(res);
+
+  const pageWidth = doc.page.width;
+  const contentX = 24;
+  const contentWidth = pageWidth - 48;
+
+  let y = 24;
+
+  // Header card (single logo)
+  drawCard(doc, contentX, y, contentWidth, 120);
+  if (logoPath) {
+    doc.image(logoPath, contentX + 14, y + 16, { fit: [72, 72] });
+  }
+
+  doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(20)
+    .text(schoolInfo.name || 'SCHOOL', contentX + 94, y + 18, { width: contentWidth - 108, align: 'center' });
+
+  doc.fillColor('#5b6b80').font('Helvetica').fontSize(11)
+    .text(schoolInfo.address || '', contentX + 94, y + 46, { width: contentWidth - 108, align: 'center' });
+  doc.text(`Tel: ${schoolInfo.phone || '-'} | Email: ${schoolInfo.email || '-'}`, contentX + 94, y + 64, {
+    width: contentWidth - 108,
+    align: 'center'
+  });
+
+  doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(14)
+    .text('SCHOOL REPORT', contentX + 94, y + 86, { width: contentWidth - 108, align: 'center' });
+  doc.fillColor('#5b6b80').font('Helvetica').fontSize(10)
+    .text(`${exam.name} | ${exam.term} ${exam.year}`, contentX + 94, y + 100, { width: contentWidth - 108, align: 'center' });
+  if (Number(exam.component_weight || 0) > 0 && exam.component_exam_name) {
+    doc.text(
+      `${Number(exam.component_weight)}% ${exam.component_exam_name} and ${Number(exam.current_weight || 100)}% ${exam.name}`,
+      contentX + 94,
+      y + 114,
+      { width: contentWidth - 108, align: 'center' }
+    );
+  }
+
+  y += 136;
+
+  // Student info card
+  drawCard(doc, contentX, y, contentWidth, 76);
+  doc.fillColor('#4a5a70').font('Helvetica').fontSize(10);
+  doc.text('Form / Class:', contentX + 14, y + 18);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text(exam.class_name, contentX + 78, y + 18);
+  doc.fillColor('#4a5a70').font('Helvetica').text('Student Name:', contentX + 14, y + 42);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text(student.name, contentX + 88, y + 42);
+
+  doc.fillColor('#4a5a70').font('Helvetica').text('Position in Class:', contentX + contentWidth / 2, y + 18);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatRank(studentRanking?.rank || 0), contentX + contentWidth / 2 + 78, y + 18);
+  doc.fillColor('#4a5a70').font('Helvetica').text('Number of Students:', contentX + contentWidth / 2, y + 42);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text(String(rankings.length), contentX + contentWidth / 2 + 95, y + 42);
+
+  y += 94;
+
+  const componentWeight = Number(exam.component_weight || 0);
+  const currentWeight = Number(exam.current_weight || 100);
+  const hasComponent = componentWeight > 0 && Boolean(exam.component_exam_name);
+  const componentLabel = exam.component_exam_name || 'CAT';
+  const currentLabel = exam.name || 'Current Exam';
+
+  // Academic table card
+  const columns = hasComponent
+    ? [
+        { key: 'subject', label: 'Subject', width: 95 },
+        { key: 'ca', label: `${componentWeight}% ${componentLabel}`, width: 70 },
+        { key: 'exam', label: `${currentWeight}% ${currentLabel}`, width: 70 },
+        { key: 'final', label: 'Final Mark', width: 55 },
+        { key: 'position', label: 'Position', width: 45 },
+        { key: 'grade', label: 'Grade', width: 45 },
+        { key: 'remark', label: 'Remark', width: 75 },
+        { key: 'signature', label: 'Signature', width: 65 }
+      ]
+    : [
+        { key: 'subject', label: 'Subject', width: 95 },
+        { key: 'score', label: 'Score', width: 70 },
+        { key: 'position', label: 'Position', width: 45 },
+        { key: 'grade', label: 'Grade', width: 45 },
+        { key: 'remark', label: 'Remark', width: 75 },
+        { key: 'signature', label: 'Signature', width: 65 }
+      ];
+  const tableX = contentX + 10;
+  const tableWidth = columns.reduce((sum, c) => sum + c.width, 0);
+  const rowHeight = 30;
+  const minRows = 8;
+  const tableRows = Math.max(minRows, results.length);
+  const tableHeight = rowHeight * (tableRows + 1);
+
+  drawCard(doc, contentX, y, contentWidth, tableHeight + 18);
+  drawRowBackground(doc, tableX, y + 10, tableWidth, rowHeight, '#f4f7fc');
+
+  let colX = tableX;
+  doc.fillColor('#516279').font('Helvetica-Bold').fontSize(9);
+  columns.forEach((column) => {
+    doc.text(column.label, colX + 4, y + 20, { width: column.width - 8, align: 'left' });
+    colX += column.width;
+  });
+
+  const rowStartY = y + 10 + rowHeight;
+  for (let row = 0; row < tableRows; row++) {
+    const rowY = rowStartY + row * rowHeight;
+    drawRowBackground(doc, tableX, rowY, tableWidth, rowHeight, row % 2 === 0 ? '#ffffff' : '#fafbfd');
+    doc.strokeColor('#e2e8f0').lineWidth(0.6).moveTo(tableX, rowY).lineTo(tableX + tableWidth, rowY).stroke();
+
+    const result = results[row];
+    if (!result) continue;
+
+    const gradeInfo = getGrade(result.score, exam.grading_system);
+    const subjectRank = subjectRankMaps.get(result.subject_id)?.get(studentId) || 0;
+    const gradeDisplay = exam.grading_system === 'msce' ? String(result.points ?? gradeInfo.points ?? '-') : (result.grade || gradeInfo.grade);
+    const remarkDisplay = exam.grading_system === 'msce' ? gradeInfo.remark : (result.remark || gradeInfo.remark);
+
+    const values = hasComponent
+      ? [
+          result.subject_name,
+          ((Number(result.component_score || 0) * componentWeight) / 100).toFixed(1),
+          ((Number(result.current_score || result.score) * currentWeight) / 100).toFixed(1),
+          result.score.toFixed(1),
+          subjectRank > 0 ? formatRank(subjectRank) : '-',
+          gradeDisplay,
+          remarkDisplay,
+          String(subjectTeacherMap.get(result.subject_id) || '__________')
+        ]
+      : [
+          result.subject_name,
+          result.score.toFixed(1),
+          subjectRank > 0 ? formatRank(subjectRank) : '-',
+          gradeDisplay,
+          remarkDisplay,
+          String(subjectTeacherMap.get(result.subject_id) || '__________')
+        ];
+
+    colX = tableX;
+    doc.fillColor('#0f172a').font('Helvetica').fontSize(10);
+    values.forEach((value, index) => {
+      const align = index > 0 && index < (hasComponent ? 6 : 4) ? 'center' : 'left';
+      doc.text(String(value), colX + 4, rowY + 10, { width: columns[index].width - 8, align });
+      colX += columns[index].width;
+    });
+  }
+
+  y += tableHeight + 30;
+
+  // Legend + Summary cards
+  const split = 10;
+  const blockWidth = (contentWidth - split) / 2;
+  drawCard(doc, contentX, y, blockWidth, 140);
+  drawCard(doc, contentX + blockWidth + split, y, blockWidth, 140);
+
+  doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(12).text('Grading Key / Legend', contentX + 14, y + 14);
+  doc.fillColor('#0f172a').font('Helvetica').fontSize(9);
+
+  let legendY = y + 36;
+  criteria.forEach((item) => {
+    const text = exam.grading_system === 'msce'
+      ? `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${formatPoints(item.points)} point${item.points > 1 ? 's' : ''} (${item.remark})`
+      : `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${item.grade} (${item.remark})`;
+    doc.text(text, contentX + 14, legendY, { width: blockWidth - 24 });
+    legendY += 18;
+  });
+
+  const summaryX = contentX + blockWidth + split + 14;
+  doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(12).text('Summary & Remarks', summaryX, y + 14);
+  doc.fillColor('#4a5a70').font('Helvetica').fontSize(10);
+  doc.text('Total Marks:', summaryX, y + 40);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatOneDecimal(totalScore), summaryX + 72, y + 40);
+
+  if (exam.grading_system === 'msce') {
+    doc.fillColor('#4a5a70').font('Helvetica').text('Overall Points:', summaryX, y + 64);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatPoints(studentRanking?.totalPoints), summaryX + 78, y + 64);
+  } else {
+    doc.fillColor('#4a5a70').font('Helvetica').text('Overall Grade:', summaryX, y + 64);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(`${overallGrade.grade}`, summaryX + 74, y + 64);
+  }
+
+  doc.fillColor('#4a5a70').font('Helvetica').text("Teacher's Remarks:", summaryX, y + 88);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text(passFail.status, summaryX + 98, y + 88);
+  doc.fillColor('#4a5a70').font('Helvetica').text("Head Teacher's Remarks:", summaryX, y + 112);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text('____________________', summaryX + 125, y + 112);
+
+  y += 152;
+
+  // Footer card
+  drawCard(doc, contentX, y, contentWidth, 92);
+  doc.fillColor('#4a5a70').font('Helvetica').fontSize(10);
+  doc.text(`Next Term Opening Date: ${schoolInfo.opening_date || '____________________'}`, contentX + 14, y + 20);
+  doc.text(`School Fees: ${schoolInfo.school_fees || '____________________'}`, contentX + 14, y + 44);
+  doc.text('School Stamp: ____________________', contentX + 14, y + 68);
+
+  const footerRightX = contentX + contentWidth / 2;
+  drawHeadteacherSignature(doc, schoolInfo.headteacher_signature, footerRightX, y + 20, contentWidth / 2 - 16);
+  doc.text('Class Teacher Signature: ____________________', footerRightX, y + 44);
+  doc.text(`Motto: ${schoolInfo.motto || '-'}`, footerRightX, y + 68);
+
+  doc.end();
+});
+
+// Download all student report cards for a class exam as a single PDF
+router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
+  const { classId, examId } = req.params;
+
+  const exam = db.prepare(`
+    SELECT e.*, c.name as class_name, c.year as class_year,
+           ce.name as component_exam_name
+    FROM exams e
+    JOIN classes c ON e.class_id = c.id
+    LEFT JOIN exams ce ON e.component_exam_id = ce.id
+    WHERE e.id = ? AND e.class_id = ?
+  `).get(examId, classId);
+
+  if (!exam) {
+    return res.status(404).json({ error: 'Exam not found' });
+  }
+  if (!ensureClassAccess(req, res, classId)) return;
+
+  const rankings = rankStudentsByExam(examId);
+  const schoolInfo = db.prepare('SELECT * FROM school_info WHERE id = 1').get();
+  const logoPath = resolveLogoPath(schoolInfo?.logo);
+  const criteria = db.prepare(`
+    SELECT grade, min_score, max_score, points, remark
+    FROM grade_criteria
+    WHERE system = ?
+    ORDER BY min_score DESC
+  `).all(exam.grading_system);
+  const classSubjects = db.prepare(`
+    SELECT id, teacher_name
+    FROM subjects
+    WHERE class_id = ?
+  `).all(exam.class_id);
+  const subjectTeacherMap = new Map(classSubjects.map((row) => [row.id, row.teacher_name || '']));
+
+  const allScores = [];
+  rankings.forEach((entry) => {
+    const r = calculateStudentResults(examId, entry.student.id);
+    r.results.forEach((subjectRow) => {
+      allScores.push({
+        student_id: entry.student.id,
+        subject_id: subjectRow.subject_id,
+        score: subjectRow.score
+      });
+    });
+  });
+  const subjectRankMaps = buildSubjectRankMaps(allScores);
+
+  const doc = new PDFDocument({ margin: 24, size: 'A4' });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${exam.class_name}_${exam.name}_student_reports.pdf"`);
+  doc.pipe(res);
+
+  rankings.forEach((entry, index) => {
+    if (index > 0) doc.addPage();
+
+    const student = entry.student;
+    const calculated = calculateStudentResults(examId, student.id);
+    const results = calculated.results
+      .slice()
+      .sort((a, b) => (a.subject_name || '').localeCompare(b.subject_name || ''));
+    const averageScore = calculated.averageScore;
+    const totalScore = calculated.totalScore;
+    const overallGrade = getOverallGradeWithEnglishRule(exam, averageScore, results);
+    const passFail = getPassFailRemark(exam, results);
+
+    const pageWidth = doc.page.width;
+    const contentX = 24;
+    const contentWidth = pageWidth - 48;
+    let y = 24;
+
+    drawCard(doc, contentX, y, contentWidth, 120);
+    if (logoPath) {
+      doc.image(logoPath, contentX + 14, y + 16, { fit: [72, 72] });
+    }
+    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(20)
+      .text(schoolInfo.name || 'SCHOOL', contentX + 94, y + 18, { width: contentWidth - 108, align: 'center' });
+    doc.fillColor('#5b6b80').font('Helvetica').fontSize(11)
+      .text(schoolInfo.address || '', contentX + 94, y + 46, { width: contentWidth - 108, align: 'center' });
+    doc.text(`Tel: ${schoolInfo.phone || '-'} | Email: ${schoolInfo.email || '-'}`, contentX + 94, y + 64, {
+      width: contentWidth - 108,
+      align: 'center'
+    });
+    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(14)
+      .text('SCHOOL REPORT', contentX + 94, y + 86, { width: contentWidth - 108, align: 'center' });
+    doc.fillColor('#5b6b80').font('Helvetica').fontSize(10)
+      .text(`${exam.name} | ${exam.term} ${exam.year}`, contentX + 94, y + 100, { width: contentWidth - 108, align: 'center' });
+
+    y += 136;
+    drawCard(doc, contentX, y, contentWidth, 76);
+    doc.fillColor('#4a5a70').font('Helvetica').fontSize(10);
+    doc.text('Form / Class:', contentX + 14, y + 18);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(exam.class_name, contentX + 78, y + 18);
+    doc.fillColor('#4a5a70').font('Helvetica').text('Student Name:', contentX + 14, y + 42);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(student.name, contentX + 88, y + 42);
+    doc.fillColor('#4a5a70').font('Helvetica').text('Position in Class:', contentX + contentWidth / 2, y + 18);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatRank(entry.rank || 0), contentX + contentWidth / 2 + 78, y + 18);
+    doc.fillColor('#4a5a70').font('Helvetica').text('Number of Students:', contentX + contentWidth / 2, y + 42);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(String(rankings.length), contentX + contentWidth / 2 + 95, y + 42);
+
+    y += 94;
+    const componentWeight = Number(exam.component_weight || 0);
+    const currentWeight = Number(exam.current_weight || 100);
+    const hasComponent = componentWeight > 0 && Boolean(exam.component_exam_name);
+    const columns = hasComponent
+      ? [
+          { key: 'subject', label: 'Subject', width: 95 },
+          { key: 'ca', label: `${componentWeight}%`, width: 70 },
+          { key: 'exam', label: `${currentWeight}%`, width: 70 },
+          { key: 'final', label: 'Final Mark', width: 55 },
+          { key: 'position', label: 'Position', width: 45 },
+          { key: 'grade', label: 'Grade', width: 45 },
+          { key: 'remark', label: 'Remark', width: 75 },
+          { key: 'signature', label: 'Signature', width: 65 }
+        ]
+      : [
+          { key: 'subject', label: 'Subject', width: 95 },
+          { key: 'score', label: 'Score', width: 70 },
+          { key: 'position', label: 'Position', width: 45 },
+          { key: 'grade', label: 'Grade', width: 45 },
+          { key: 'remark', label: 'Remark', width: 75 },
+          { key: 'signature', label: 'Signature', width: 65 }
+        ];
+    const tableX = contentX + 10;
+    const tableWidth = columns.reduce((sum, c) => sum + c.width, 0);
+    const rowHeight = 30;
+    const tableRows = Math.max(8, results.length);
+    const tableHeight = rowHeight * (tableRows + 1);
+
+    drawCard(doc, contentX, y, contentWidth, tableHeight + 18);
+    drawRowBackground(doc, tableX, y + 10, tableWidth, rowHeight, '#f4f7fc');
+    let colX = tableX;
+    doc.fillColor('#516279').font('Helvetica-Bold').fontSize(9);
+    columns.forEach((column) => {
+      doc.text(column.label, colX + 4, y + 20, { width: column.width - 8, align: 'left' });
+      colX += column.width;
+    });
+    const rowStartY = y + 10 + rowHeight;
+    for (let row = 0; row < tableRows; row++) {
+      const rowY = rowStartY + row * rowHeight;
+      drawRowBackground(doc, tableX, rowY, tableWidth, rowHeight, row % 2 === 0 ? '#ffffff' : '#fafbfd');
+      doc.strokeColor('#e2e8f0').lineWidth(0.6).moveTo(tableX, rowY).lineTo(tableX + tableWidth, rowY).stroke();
+      const result = results[row];
+      if (!result) continue;
+      const gradeInfo = getGrade(result.score, exam.grading_system);
+      const subjectRank = subjectRankMaps.get(result.subject_id)?.get(student.id) || 0;
+      const gradeDisplay = exam.grading_system === 'msce' ? String(result.points ?? gradeInfo.points ?? '-') : (result.grade || gradeInfo.grade);
+      const remarkDisplay = exam.grading_system === 'msce' ? gradeInfo.remark : (result.remark || gradeInfo.remark);
+      const values = hasComponent
+        ? [
+            result.subject_name,
+            ((Number(result.component_score || 0) * componentWeight) / 100).toFixed(1),
+            ((Number(result.current_score || result.score) * currentWeight) / 100).toFixed(1),
+            result.score.toFixed(1),
+            subjectRank > 0 ? formatRank(subjectRank) : '-',
+            gradeDisplay,
+            remarkDisplay,
+            String(subjectTeacherMap.get(result.subject_id) || '__________')
+          ]
+        : [
+            result.subject_name,
+            result.score.toFixed(1),
+            subjectRank > 0 ? formatRank(subjectRank) : '-',
+            gradeDisplay,
+            remarkDisplay,
+            String(subjectTeacherMap.get(result.subject_id) || '__________')
+          ];
+      colX = tableX;
+      doc.fillColor('#0f172a').font('Helvetica').fontSize(10);
+      values.forEach((value, colIndex) => {
+        const align = colIndex > 0 && colIndex < (hasComponent ? 6 : 4) ? 'center' : 'left';
+        doc.text(String(value), colX + 4, rowY + 10, { width: columns[colIndex].width - 8, align });
+        colX += columns[colIndex].width;
+      });
+    }
+
+    y += tableHeight + 30;
+    const split = 10;
+    const blockWidth = (contentWidth - split) / 2;
+    drawCard(doc, contentX, y, blockWidth, 140);
+    drawCard(doc, contentX + blockWidth + split, y, blockWidth, 140);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(12).text('Grading Key / Legend', contentX + 14, y + 14);
+    doc.fillColor('#0f172a').font('Helvetica').fontSize(9);
+    let legendY = y + 36;
+    criteria.forEach((item) => {
+      const text = exam.grading_system === 'msce'
+        ? `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${formatPoints(item.points)} point${item.points > 1 ? 's' : ''} (${item.remark})`
+        : `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${item.grade} (${item.remark})`;
+      doc.text(text, contentX + 14, legendY, { width: blockWidth - 24 });
+      legendY += 18;
+    });
+    const summaryX = contentX + blockWidth + split + 14;
+    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(12).text('Summary & Remarks', summaryX, y + 14);
+    doc.fillColor('#4a5a70').font('Helvetica').fontSize(10);
+    doc.text('Total Marks:', summaryX, y + 40);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatOneDecimal(totalScore), summaryX + 72, y + 40);
+    if (exam.grading_system === 'msce') {
+      doc.fillColor('#4a5a70').font('Helvetica').text('Overall Points:', summaryX, y + 64);
+      doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatPoints(entry.totalPoints), summaryX + 78, y + 64);
+    } else {
+      doc.fillColor('#4a5a70').font('Helvetica').text('Overall Grade:', summaryX, y + 64);
+      doc.fillColor('#0f172a').font('Helvetica-Bold').text(`${overallGrade.grade}`, summaryX + 74, y + 64);
+    }
+    doc.fillColor('#4a5a70').font('Helvetica').text("Teacher's Remarks:", summaryX, y + 88);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(passFail.status, summaryX + 98, y + 88);
+    doc.fillColor('#4a5a70').font('Helvetica').text("Head Teacher's Remarks:", summaryX, y + 112);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text('____________________', summaryX + 125, y + 112);
+
+    y += 152;
+    drawCard(doc, contentX, y, contentWidth, 92);
+    doc.fillColor('#4a5a70').font('Helvetica').fontSize(10);
+    doc.text(`Next Term Opening Date: ${schoolInfo.opening_date || '____________________'}`, contentX + 14, y + 20);
+    doc.text(`School Fees: ${schoolInfo.school_fees || '____________________'}`, contentX + 14, y + 44);
+    doc.text('School Stamp: ____________________', contentX + 14, y + 68);
+    const footerRightX = contentX + contentWidth / 2;
+    drawHeadteacherSignature(doc, schoolInfo.headteacher_signature, footerRightX, y + 20, contentWidth / 2 - 16);
+    doc.text('Class Teacher Signature: ____________________', footerRightX, y + 44);
+    doc.text(`Motto: ${schoolInfo.motto || '-'}`, footerRightX, y + 68);
+  });
+
+  doc.end();
+});
+
+// Get class results summary
+router.get('/class/:classId/exam/:examId', (req, res) => {
+  const { classId, examId } = req.params;
+
+  const exam = db.prepare(`
+    SELECT e.*, c.name as class_name, c.year as class_year,
+           ce.name as component_exam_name
+    FROM exams e
+    JOIN classes c ON e.class_id = c.id
+    LEFT JOIN exams ce ON e.component_exam_id = ce.id
+    WHERE e.id = ? AND e.class_id = ?
+  `).get(examId, classId);
+
+  if (!exam) {
+    return res.status(404).json({ error: 'Exam not found' });
+  }
+  if (!ensureClassAccess(req, res, classId)) return;
+
+  const rankings = rankStudentsByExam(examId);
+  const schoolInfo = db.prepare('SELECT * FROM school_info WHERE id = 1').get();
+
+  // Get subjects
+  const subjects = db.prepare(
+    'SELECT * FROM subjects WHERE class_id = ? ORDER BY name ASC'
+  ).all(classId);
+
+  // Calculate class statistics
+  const allResults = db.prepare(`
+    SELECT er.*, s.name as student_name
+    FROM exam_results er
+    JOIN students s ON er.student_id = s.id
+    WHERE er.exam_id = ?
+  `).all(examId);
+
+  const classAverage = rankings.length > 0
+    ? rankings.reduce((sum, r) => sum + r.averageScore, 0) / rankings.length
+    : 0;
+
+  const highestAverage = rankings.length > 0 ? rankings[0].averageScore : 0;
+  const lowestAverage = rankings.length > 0 ? rankings[rankings.length - 1].averageScore : 0;
+
+  res.json({
+    report: {
+      school: schoolInfo,
+      exam,
+      weighting: {
+        componentExamName: exam.component_exam_name || null,
+        componentWeight: Number(exam.component_weight || 0),
+        currentWeight: Number(exam.current_weight || 100)
+      },
+      subjects,
+      rankings,
+      statistics: {
+        totalStudents: rankings.length,
+        classAverage: Number(classAverage.toFixed(1)),
+        highestAverage: Number(highestAverage.toFixed(1)),
+        lowestAverage: Number(lowestAverage.toFixed(1))
+      }
+    }
+  });
+});
+
+// Download class results as Excel
+router.get('/class/:classId/exam/:examId/excel', (req, res) => {
+  const { classId, examId } = req.params;
+
+  const exam = db.prepare(`
+    SELECT e.*, c.name as class_name, c.year as class_year,
+           ce.name as component_exam_name
+    FROM exams e
+    JOIN classes c ON e.class_id = c.id
+    LEFT JOIN exams ce ON e.component_exam_id = ce.id
+    WHERE e.id = ? AND e.class_id = ?
+  `).get(examId, classId);
+
+  if (!exam) {
+    return res.status(404).json({ error: 'Exam not found' });
+  }
+  if (!ensureClassAccess(req, res, classId)) return;
+
+  const subjects = db.prepare(
+    'SELECT * FROM subjects WHERE class_id = ? ORDER BY name ASC'
+  ).all(classId);
+
+  const rankings = rankStudentsByExam(examId);
+
+  // Build Excel data
+  const headers = ['Rank', 'Student Name', 'Admission No', ...subjects.map(s => s.name), 'Total', 'Average', 'Grade'];
+  
+  const rows = rankings.map(r => {
+    const studentResults = calculateStudentResults(examId, r.student.id).results;
+    const resultMap = new Map(studentResults.map(res => [res.subject_id, res.score]));
+    const overallGrade = getOverallGradeWithEnglishRule(exam, r.averageScore, studentResults);
+
+    return [
+      r.rank,
+      r.student.name,
+      r.student.admission_number || '',
+      ...subjects.map(s => {
+        const score = resultMap.get(s.id);
+        return score !== undefined ? Number(score).toFixed(1) : '';
+      }),
+      Number(r.totalScore ?? 0).toFixed(1),
+      Number(r.averageScore).toFixed(1),
+      overallGrade.grade
+    ];
+  });
+
+  const ws = xlsx.utils.aoa_to_sheet([headers, ...rows]);
+  const wb = xlsx.utils.book_new();
+  xlsx.utils.book_append_sheet(wb, ws, 'Results');
+
+  const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${exam.class_name}_${exam.name}_results.xlsx"`);
+  res.send(buffer);
+});
+
+// Download class results as PDF
+router.get('/class/:classId/exam/:examId/pdf', (req, res) => {
+  const { classId, examId } = req.params;
+
+  const exam = db.prepare(`
+    SELECT e.*, c.name as class_name, c.year as class_year,
+           ce.name as component_exam_name
+    FROM exams e
+    JOIN classes c ON e.class_id = c.id
+    LEFT JOIN exams ce ON e.component_exam_id = ce.id
+    WHERE e.id = ? AND e.class_id = ?
+  `).get(examId, classId);
+
+  if (!exam) {
+    return res.status(404).json({ error: 'Exam not found' });
+  }
+  if (!ensureClassAccess(req, res, classId)) return;
+
+  const subjects = db.prepare(
+    'SELECT * FROM subjects WHERE class_id = ? ORDER BY name ASC'
+  ).all(classId);
+
+  const rankings = rankStudentsByExam(examId);
+  const schoolInfo = db.prepare('SELECT * FROM school_info WHERE id = 1').get();
+  const logoPath = resolveLogoPath(schoolInfo?.logo);
+
+  const doc = new PDFDocument({ margin: 20, size: 'A4', layout: 'landscape' });
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${exam.class_name}_${exam.name}_results.pdf"`);
+
+  doc.pipe(res);
+
+  const pageWidth = doc.page.width;
+  const contentX = 20;
+  const contentWidth = pageWidth - 40;
+
+  let y = 20;
+
+  // Header block
+  drawCard(doc, contentX, y, contentWidth, 92);
+  if (logoPath) {
+    doc.image(logoPath, contentX + 14, y + 12, { fit: [52, 52] });
+  }
+  doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(18)
+    .text(schoolInfo.name || 'SCHOOL', contentX + 78, y + 16, { width: contentWidth - 92 });
+  doc.fillColor('#5b6b80').font('Helvetica').fontSize(11)
+    .text(`${exam.class_name} - ${exam.name}`, contentX + 78, y + 44, { width: contentWidth - 92 });
+  doc.text(`${exam.term} ${exam.year}`, contentX + 78, y + 64, { width: contentWidth - 92 });
+  if (Number(exam.component_weight || 0) > 0 && exam.component_exam_name) {
+    doc.text(
+      `${Number(exam.component_weight)}% ${exam.component_exam_name} and ${Number(exam.current_weight || 100)}% ${exam.name}`,
+      contentX + 78,
+      y + 78,
+      { width: contentWidth - 92 }
+    );
+  }
+
+  y += 106;
+
+  // Table setup
+  const rankW = 58;
+  const nameW = 190;
+  const totalW = 70;
+  const avgW = 65;
+  const finalW = 70; // points or grade
+  const subjectW = Math.max(46, Math.min(80, (contentWidth - rankW - nameW - totalW - avgW - finalW) / Math.max(1, subjects.length)));
+
+  const columns = [
+    { label: 'Rank', width: rankW, align: 'left' },
+    { label: 'Student Name', width: nameW, align: 'left' },
+    ...subjects.map((s) => ({ label: s.code || s.name.toUpperCase().slice(0, 5), width: subjectW, align: 'center' })),
+    { label: 'Total', width: totalW, align: 'center' },
+    { label: 'Avg', width: avgW, align: 'center' },
+    { label: exam.grading_system === 'msce' ? 'Points' : 'Grade', width: finalW, align: 'center' }
+  ];
+
+  const tableX = contentX;
+  const rowHeight = 34;
+  const headerHeight = 36;
+  const tableWidth = columns.reduce((sum, c) => sum + c.width, 0);
+
+  drawCard(doc, contentX, y, contentWidth, headerHeight + rowHeight * Math.max(rankings.length, 1) + 14);
+  drawRowBackground(doc, tableX, y + 8, tableWidth, headerHeight, '#f4f7fc');
+
+  let x = tableX;
+  doc.fillColor('#5b6b80').font('Helvetica-Bold').fontSize(10);
+  columns.forEach((column) => {
+    doc.text(column.label, x + 4, y + 22, {
+      width: column.width - 8,
+      align: column.align
+    });
+    x += column.width;
+  });
+
+  rankings.forEach((r, index) => {
+    const rowY = y + 8 + headerHeight + rowHeight * index;
+    let rowColor = index % 2 === 0 ? '#ffffff' : '#fafbfd';
+    if (r.rank === 1) rowColor = '#fff7e8';
+    if (r.rank === 2) rowColor = '#f7f8fb';
+    if (r.rank === 3) rowColor = '#fcf4ef';
+
+    drawRowBackground(doc, tableX, rowY, tableWidth, rowHeight, rowColor);
+    doc.strokeColor('#e2e8f0').lineWidth(0.5).moveTo(tableX, rowY).lineTo(tableX + tableWidth, rowY).stroke();
+
+    const studentResults = calculateStudentResults(examId, r.student.id).results;
+    const resultMap = new Map(studentResults.map((res) => [res.subject_id, res.score]));
+    const overallGrade = getOverallGradeWithEnglishRule(exam, r.averageScore, studentResults);
+    const totalPoints = r.totalPoints ?? studentResults.reduce((sum, row) => {
+      const info = getGrade(Number(row.score), 'msce');
+      return sum + (info.points || 0);
+    }, 0);
+
+    const values = [
+      formatRank(r.rank),
+      r.student.name,
+      ...subjects.map((s) => {
+        const score = resultMap.get(s.id);
+        return score !== undefined ? Number(score).toFixed(1) : '-';
+      }),
+      Number.isFinite(Number(r.totalScore)) ? Number(r.totalScore).toFixed(1) : '-',
+      Number.isFinite(r.averageScore) ? Number(r.averageScore).toFixed(1) : '-',
+      exam.grading_system === 'msce' ? formatPoints(totalPoints) : String(overallGrade.grade)
+    ];
+
+    x = tableX;
+    values.forEach((value, colIndex) => {
+      const isFinalCol = colIndex === values.length - 1;
+      const textColor = exam.grading_system === 'msce' && isFinalCol ? '#d97706' : '#0f172a';
+      const font = colIndex === 0 || colIndex === 1 || colIndex >= values.length - 3 ? 'Helvetica-Bold' : 'Helvetica';
+
+      doc.fillColor(textColor).font(font).fontSize(9.5).text(String(value), x + 4, rowY + 11, {
+        width: columns[colIndex].width - 8,
+        align: columns[colIndex].align
+      });
+      x += columns[colIndex].width;
+    });
+  });
+
+  doc.end();
+});
+
+export default router;
+
+
