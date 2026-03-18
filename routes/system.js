@@ -66,20 +66,28 @@ function applyImportPayload(payload) {
 
 function isFreshBootstrapState() {
   const userCount = Number(db.prepare('SELECT COUNT(*) as count FROM users').get()?.count || 0);
-  const dataTables = [
-    'classes',
+  if (userCount > 1) return false;
+
+  // "Fresh" includes seeded defaults (classes/subjects/criteria) so first migration
+  // can run without requiring cloud login.
+  const operationalTables = [
     'students',
-    'subjects',
-    'student_subjects',
     'exams',
     'exam_results',
     'user_class_assignments',
   ];
-  const hasAcademicData = dataTables.some((table) => {
+  const hasOperationalData = operationalTables.some((table) => {
     const count = Number(db.prepare(`SELECT COUNT(*) as count FROM ${table}`).get()?.count || 0);
     return count > 0;
   });
-  return userCount <= 1 && !hasAcademicData;
+  if (hasOperationalData) return false;
+
+  const school = db.prepare('SELECT name, address, phone, email FROM school_info WHERE id = 1').get();
+  if (!school) return true;
+  const hasConfiguredSchoolInfo = [school.address, school.phone, school.email]
+    .some((value) => String(value || '').trim().length > 0);
+  const hasCustomName = String(school.name || '').trim() && String(school.name || '').trim() !== 'My School';
+  return !hasConfiguredSchoolInfo && !hasCustomName;
 }
 
 router.get('/export', authenticateToken, (req, res) => {

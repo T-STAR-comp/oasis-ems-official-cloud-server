@@ -287,11 +287,76 @@ function migrateExamSubjectProfilesTable() {
   db.exec('PRAGMA foreign_keys = ON;');
 }
 
+function repairExamResultsForeignKey() {
+  const tableInfo = db.prepare('PRAGMA table_info(exam_results)').all();
+  if (tableInfo.length === 0) return;
+
+  const fkRows = db.prepare('PRAGMA foreign_key_list(exam_results)').all();
+  const examFk = fkRows.find((row) => row.from === 'exam_id');
+  if (!examFk || examFk.table === 'exams') return;
+
+  const legacyTable = 'exam_results_old_fkfix';
+  const allColumns = [
+    'id',
+    'exam_id',
+    'student_id',
+    'subject_id',
+    'score',
+    'grade',
+    'points',
+    'created_at',
+    'updated_at',
+  ];
+  const existingColumns = tableInfo.map((column) => column.name);
+  const copyColumns = allColumns.filter((column) => existingColumns.includes(column));
+
+  db.exec('PRAGMA foreign_keys = OFF;');
+  try {
+    const legacyExists = db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
+    ).get(legacyTable);
+    if (legacyExists) {
+      db.exec(`DROP TABLE ${legacyTable}`);
+    }
+
+    db.exec(`ALTER TABLE exam_results RENAME TO ${legacyTable}`);
+    db.exec(`
+      CREATE TABLE exam_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        exam_id TEXT NOT NULL,
+        student_id TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        score REAL NOT NULL CHECK(score >= 0 AND score <= 100),
+        grade TEXT,
+        points INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (exam_id) REFERENCES exams(id) ON DELETE CASCADE,
+        FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+        FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+        UNIQUE(exam_id, student_id, subject_id)
+      )
+    `);
+
+    if (copyColumns.length > 0) {
+      db.exec(`
+        INSERT INTO exam_results (${copyColumns.join(', ')})
+        SELECT ${copyColumns.join(', ')} FROM ${legacyTable}
+      `);
+    }
+
+    db.exec(`DROP TABLE ${legacyTable}`);
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON;');
+  }
+}
+
 function migrateGradingTables() {
   try {
     migrateExamTable();
     migrateGradeCriteriaTable();
     migrateExamSubjectProfilesTable();
+    repairExamResultsForeignKey();
   } catch (error) {
     console.error('Failed to migrate grading tables:', error);
   }
