@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log*
+yarn-error.log*
+.env
+.env.*
+!.env.example
+db/*.db
+db/*.db-shm
+db/*.db-wal
+coverage
+.git
+.gitignore
