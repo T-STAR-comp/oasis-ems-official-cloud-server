@@ -4,6 +4,14 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import {
+  DEFAULT_COUNTRY,
+  normalizeCountry,
+  ALL_GRADING_SYSTEMS,
+  getDefaultCriteriaForSystem,
+  getDefaultClassesForCountry,
+  getGradingSystemsForCountry,
+} from '../utils/education.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,10 +30,9 @@ function copyIfExists(sourcePath, destinationPath) {
 
 function resolveDatabasePath() {
   const legacyDbPath = path.join(__dirname, 'school.db');
-  const defaultCloudDir = process.env.VERCEL ? '/tmp/oasis-data' : __dirname;
   const preferredDir = process.env.OASIS_DATA_DIR
     ? path.resolve(process.env.OASIS_DATA_DIR)
-    : defaultCloudDir;
+    : __dirname;
   ensureDirectory(preferredDir);
   const preferredDbPath = path.join(preferredDir, 'school.db');
 
@@ -113,6 +120,240 @@ function ensureInternalUid() {
   }
 }
 
+function generateSchoolId() {
+  const segment = () => crypto.randomBytes(3).toString('hex').toUpperCase();
+  return `OASIS-${segment()}-${segment()}`;
+}
+
+function ensureSchoolIdentity() {
+  const row = db.prepare('SELECT id, school_id, country FROM school_info WHERE id = 1').get();
+  if (!row) {
+    const newId = generateSchoolId();
+    const country = DEFAULT_COUNTRY;
+    db.prepare(`
+      INSERT INTO school_info (id, name, address, phone, email, logo, motto, opening_date, school_fees, headteacher_name, headteacher_signature, country, school_id)
+      VALUES (1, 'My School', '', '', '', NULL, '', '', '', '', '', ?, ?)
+    `).run(country, newId);
+    return { schoolId: newId, country };
+  }
+
+  let updated = false;
+  let schoolId = row.school_id;
+  let country = row.country;
+  if (!schoolId) {
+    schoolId = generateSchoolId();
+    updated = true;
+  }
+  if (!country) {
+    country = DEFAULT_COUNTRY;
+    updated = true;
+  }
+  if (updated) {
+    db.prepare(`
+      UPDATE school_info
+      SET school_id = ?, country = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1
+    `).run(schoolId, country);
+  }
+  return { schoolId, country: normalizeCountry(country) };
+}
+
+function ensureTableHasGradingSystems(tableName, systems) {
+  const sql = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`
+  ).get(tableName)?.sql;
+  if (!sql) return true;
+  return systems.every((system) => sql.includes(`'${system}'`));
+}
+
+function migrateExamTable() {
+  if (ensureTableHasGradingSystems('exams', ALL_GRADING_SYSTEMS)) return;
+  const columnInfo = db.prepare('PRAGMA table_info(exams)').all();
+  if (columnInfo.length === 0) return;
+
+  const columns = columnInfo.map((c) => c.name);
+  db.exec('PRAGMA foreign_keys = OFF;');
+  db.exec('ALTER TABLE exams RENAME TO exams_old;');
+  db.exec(`
+    CREATE TABLE exams (
+      id TEXT PRIMARY KEY,
+      class_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL CHECK(type IN ('test', 'midterm', 'endterm')),
+      term TEXT NOT NULL,
+      year TEXT NOT NULL,
+      grading_system TEXT NOT NULL DEFAULT 'normal' CHECK(grading_system IN (${ALL_GRADING_SYSTEMS.map((s) => `'${s}'`).join(', ')})),
+      max_score REAL NOT NULL DEFAULT 100,
+      component_exam_id TEXT,
+      component_weight REAL NOT NULL DEFAULT 0,
+      current_weight REAL NOT NULL DEFAULT 100,
+      lock_status TEXT NOT NULL DEFAULT 'none',
+      locked_at DATETIME,
+      locked_by TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE
+    )
+  `);
+  const newColumns = [
+    'id',
+    'class_id',
+    'name',
+    'type',
+    'term',
+    'year',
+    'grading_system',
+    'max_score',
+    'component_exam_id',
+    'component_weight',
+    'current_weight',
+    'lock_status',
+    'locked_at',
+    'locked_by',
+    'created_at',
+    'updated_at',
+  ];
+  const copyColumns = newColumns.filter((column) => columns.includes(column));
+  if (copyColumns.length > 0) {
+    db.exec(`
+      INSERT INTO exams (${copyColumns.join(', ')})
+      SELECT ${copyColumns.join(', ')} FROM exams_old
+    `);
+  }
+  db.exec('DROP TABLE exams_old;');
+  db.exec('PRAGMA foreign_keys = ON;');
+}
+
+function migrateGradeCriteriaTable() {
+  if (ensureTableHasGradingSystems('grade_criteria', ALL_GRADING_SYSTEMS)) return;
+  const columnInfo = db.prepare('PRAGMA table_info(grade_criteria)').all();
+  if (columnInfo.length === 0) return;
+  const columns = columnInfo.map((c) => c.name);
+
+  db.exec('PRAGMA foreign_keys = OFF;');
+  db.exec('ALTER TABLE grade_criteria RENAME TO grade_criteria_old;');
+  db.exec(`
+    CREATE TABLE grade_criteria (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      grade TEXT NOT NULL,
+      min_score REAL NOT NULL,
+      max_score REAL NOT NULL,
+      points INTEGER,
+      remark TEXT NOT NULL,
+      system TEXT NOT NULL DEFAULT 'normal' CHECK(system IN (${ALL_GRADING_SYSTEMS.map((s) => `'${s}'`).join(', ')}))
+    )
+  `);
+  const newColumns = ['id', 'grade', 'min_score', 'max_score', 'points', 'remark', 'system'];
+  const copyColumns = newColumns.filter((column) => columns.includes(column));
+  if (copyColumns.length > 0) {
+    db.exec(`
+      INSERT INTO grade_criteria (${copyColumns.join(', ')})
+      SELECT ${copyColumns.join(', ')} FROM grade_criteria_old
+    `);
+  }
+  db.exec('DROP TABLE grade_criteria_old;');
+  db.exec('PRAGMA foreign_keys = ON;');
+}
+
+function migrateExamSubjectProfilesTable() {
+  if (ensureTableHasGradingSystems('exam_subject_grading_profiles', [...ALL_GRADING_SYSTEMS, 'custom'])) return;
+  const columnInfo = db.prepare('PRAGMA table_info(exam_subject_grading_profiles)').all();
+  if (columnInfo.length === 0) return;
+  const columns = columnInfo.map((c) => c.name);
+
+  db.exec('PRAGMA foreign_keys = OFF;');
+  db.exec('ALTER TABLE exam_subject_grading_profiles RENAME TO exam_subject_grading_profiles_old;');
+  db.exec(`
+    CREATE TABLE exam_subject_grading_profiles (
+      exam_id TEXT NOT NULL,
+      subject_id TEXT NOT NULL,
+      grading_system TEXT NOT NULL CHECK(grading_system IN (${[...ALL_GRADING_SYSTEMS, 'custom'].map((s) => `'${s}'`).join(', ')})),
+      custom_criteria TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (exam_id, subject_id),
+      FOREIGN KEY (exam_id) REFERENCES exams(id) ON DELETE CASCADE,
+      FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+    )
+  `);
+  const newColumns = ['exam_id', 'subject_id', 'grading_system', 'custom_criteria', 'updated_at'];
+  const copyColumns = newColumns.filter((column) => columns.includes(column));
+  if (copyColumns.length > 0) {
+    db.exec(`
+      INSERT INTO exam_subject_grading_profiles (${copyColumns.join(', ')})
+      SELECT ${copyColumns.join(', ')} FROM exam_subject_grading_profiles_old
+    `);
+  }
+  db.exec('DROP TABLE exam_subject_grading_profiles_old;');
+  db.exec('PRAGMA foreign_keys = ON;');
+}
+
+function migrateGradingTables() {
+  try {
+    migrateExamTable();
+    migrateGradeCriteriaTable();
+    migrateExamSubjectProfilesTable();
+  } catch (error) {
+    console.error('Failed to migrate grading tables:', error);
+  }
+}
+
+function seedGradeCriteriaForCountry(country) {
+  const systems = getGradingSystemsForCountry(country);
+  const insert = db.prepare(`
+    INSERT INTO grade_criteria (grade, min_score, max_score, points, remark, system)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+
+  systems.forEach((system) => {
+    const exists = db.prepare('SELECT 1 FROM grade_criteria WHERE system = ? LIMIT 1').get(system);
+    if (exists) return;
+    const rows = getDefaultCriteriaForSystem(system);
+    if (!rows.length) return;
+    rows.forEach((row) => {
+      insert.run(row.grade, row.min_score, row.max_score, row.points ?? null, row.remark, system);
+    });
+  });
+}
+
+function seedDefaultClasses(country) {
+  const templates = getDefaultClassesForCountry(country);
+  if (!templates.length) return;
+
+  const insertClass = db.prepare(`
+    INSERT INTO classes (id, name, year, min_subjects, max_subjects)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  const insertSubject = db.prepare(`
+    INSERT INTO subjects (id, class_id, name, code, is_compulsory, teacher_name)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+
+  const tx = db.transaction(() => {
+    templates.forEach((template) => {
+      const classId = crypto.randomUUID();
+      insertClass.run(
+        classId,
+        template.name,
+        template.year,
+        Number(template.min_subjects || 6),
+        Number(template.max_subjects || 12)
+      );
+      template.subjects.forEach((subject) => {
+        const subjectId = crypto.randomUUID();
+        insertSubject.run(
+          subjectId,
+          classId,
+          subject.name,
+          subject.code,
+          Number(subject.is_compulsory || 0),
+          null
+        );
+      });
+    });
+  });
+  tx();
+}
+
 export function initializeDatabase() {
   const ensureColumn = (table, column, definition) => {
     const columns = db.prepare(`PRAGMA table_info(${table})`).all();
@@ -154,6 +395,8 @@ export function initializeDatabase() {
       school_fees TEXT,
       headteacher_name TEXT,
       headteacher_signature TEXT,
+      country TEXT NOT NULL DEFAULT '${DEFAULT_COUNTRY}',
+      school_id TEXT,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -161,15 +404,21 @@ export function initializeDatabase() {
   ensureColumn('school_info', 'school_fees', 'school_fees TEXT');
   ensureColumn('school_info', 'headteacher_name', 'headteacher_name TEXT');
   ensureColumn('school_info', 'headteacher_signature', 'headteacher_signature TEXT');
+  ensureColumn('school_info', 'country', `country TEXT NOT NULL DEFAULT '${DEFAULT_COUNTRY}'`);
+  ensureColumn('school_info', 'school_id', 'school_id TEXT');
+
+  migrateGradingTables();
 
   // Insert default school info if not exists
   const schoolExists = db.prepare('SELECT id FROM school_info WHERE id = 1').get();
   if (!schoolExists) {
+    const generatedId = generateSchoolId();
     db.prepare(`
-      INSERT INTO school_info (id, name, address, phone, email, logo, motto, opening_date, school_fees, headteacher_name, headteacher_signature)
-      VALUES (1, 'My School', '', '', '', NULL, '', '', '', '', '')
-    `).run();
+      INSERT INTO school_info (id, name, address, phone, email, logo, motto, opening_date, school_fees, headteacher_name, headteacher_signature, country, school_id)
+      VALUES (1, 'My School', '', '', '', NULL, '', '', '', '', '', ?, ?)
+    `).run(DEFAULT_COUNTRY, generatedId);
   }
+  const { country } = ensureSchoolIdentity();
 
   // Classes table
   db.exec(`
@@ -250,7 +499,7 @@ export function initializeDatabase() {
       type TEXT NOT NULL CHECK(type IN ('test', 'midterm', 'endterm')),
       term TEXT NOT NULL,
       year TEXT NOT NULL,
-      grading_system TEXT NOT NULL DEFAULT 'normal' CHECK(grading_system IN ('normal', 'msce')),
+      grading_system TEXT NOT NULL DEFAULT 'normal' CHECK(grading_system IN (${ALL_GRADING_SYSTEMS.map((s) => `'${s}'`).join(', ')})),
       max_score REAL NOT NULL DEFAULT 100,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -294,7 +543,7 @@ export function initializeDatabase() {
       max_score REAL NOT NULL,
       points INTEGER,
       remark TEXT NOT NULL,
-      system TEXT NOT NULL DEFAULT 'normal' CHECK(system IN ('normal', 'msce'))
+      system TEXT NOT NULL DEFAULT 'normal' CHECK(system IN (${ALL_GRADING_SYSTEMS.map((s) => `'${s}'`).join(', ')}))
     )
   `);
 
@@ -302,7 +551,7 @@ export function initializeDatabase() {
     CREATE TABLE IF NOT EXISTS exam_subject_grading_profiles (
       exam_id TEXT NOT NULL,
       subject_id TEXT NOT NULL,
-      grading_system TEXT NOT NULL CHECK(grading_system IN ('normal', 'msce', 'custom')),
+      grading_system TEXT NOT NULL CHECK(grading_system IN (${[...ALL_GRADING_SYSTEMS, 'custom'].map((s) => `'${s}'`).join(', ')})),
       custom_criteria TEXT,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (exam_id, subject_id),
@@ -311,38 +560,7 @@ export function initializeDatabase() {
     )
   `);
 
-  // Insert default grade criteria if not exists
-  const criteriaExists = db.prepare('SELECT id FROM grade_criteria LIMIT 1').get();
-  if (!criteriaExists) {
-    // Normal grading
-    const insertCriteria = db.prepare(`
-      INSERT INTO grade_criteria (grade, min_score, max_score, remark, system)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    
-    insertCriteria.run('A', 80, 100, 'Excellent', 'normal');
-    insertCriteria.run('B', 65, 79, 'Very Good', 'normal');
-    insertCriteria.run('C', 50, 64, 'Good', 'normal');
-    insertCriteria.run('D', 40, 49, 'Satisfactory', 'normal');
-    insertCriteria.run('E', 30, 39, 'Fair', 'normal');
-    insertCriteria.run('F', 0, 29, 'Fail', 'normal');
-
-    // MSCE points
-    const insertMSCE = db.prepare(`
-      INSERT INTO grade_criteria (grade, min_score, max_score, points, remark, system)
-      VALUES (?, ?, ?, ?, ?, 'msce')
-    `);
-    
-    insertMSCE.run('1', 75, 100, 1, 'Distinction');
-    insertMSCE.run('2', 70, 74, 2, 'Distinction');
-    insertMSCE.run('3', 65, 69, 3, 'Credit');
-    insertMSCE.run('4', 60, 64, 4, 'Credit');
-    insertMSCE.run('5', 55, 59, 5, 'Credit');
-    insertMSCE.run('6', 50, 54, 6, 'Pass');
-    insertMSCE.run('7', 40, 49, 7, 'Pass');
-    insertMSCE.run('8', 30, 39, 8, 'Fail');
-    insertMSCE.run('9', 0, 29, 9, 'Fail');
-  }
+  seedGradeCriteriaForCountry(country);
 
   // Create indexes for better performance
   db.exec(`
@@ -368,6 +586,11 @@ export function initializeDatabase() {
     WHERE sub.is_compulsory = 1
   `);
 
+  const classExists = db.prepare('SELECT id FROM classes LIMIT 1').get();
+  if (!classExists) {
+    seedDefaultClasses(country);
+  }
+
   // Create default admin user if no users exist
   const userExists = db.prepare('SELECT id FROM users LIMIT 1').get();
   if (!userExists) {
@@ -381,11 +604,69 @@ export function initializeDatabase() {
   }
 
   ensureInternalUid();
+  ensureSchoolIdentity();
   console.log('✅ Database initialized successfully');
 }
 
 export function getInternalUid() {
   return ensureInternalUid();
+}
+
+export function resetEducationData(nextCountry) {
+  const country = normalizeCountry(nextCountry);
+  const schoolRow = db.prepare('SELECT school_id FROM school_info WHERE id = 1').get();
+  const schoolId = schoolRow?.school_id || generateSchoolId();
+
+  const wipeTables = [
+    'exam_results',
+    'exam_subject_grading_profiles',
+    'exams',
+    'student_subjects',
+    'subjects',
+    'students',
+    'classes',
+    'user_class_assignments',
+    'grade_criteria',
+    'users',
+  ];
+
+  const tx = db.transaction(() => {
+    db.exec('PRAGMA foreign_keys = OFF;');
+    wipeTables.forEach((table) => {
+      db.prepare(`DELETE FROM ${table}`).run();
+    });
+    db.exec('PRAGMA foreign_keys = ON;');
+
+    db.prepare(`
+      UPDATE school_info
+      SET name = 'My School',
+          address = '',
+          phone = '',
+          email = '',
+          logo = NULL,
+          motto = '',
+          opening_date = '',
+          school_fees = '',
+          headteacher_name = '',
+          headteacher_signature = '',
+          country = ?,
+          school_id = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1
+    `).run(country, schoolId);
+  });
+  tx();
+
+  const hashedPassword = bcrypt.hashSync('admin123', 12);
+  db.prepare(`
+    INSERT INTO users (id, username, email, password, role, full_name)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run('admin-001', 'admin', 'admin@school.com', hashedPassword, 'admin', 'System Administrator');
+
+  seedGradeCriteriaForCountry(country);
+  seedDefaultClasses(country);
+
+  return { country, schoolId };
 }
 
 export default db;

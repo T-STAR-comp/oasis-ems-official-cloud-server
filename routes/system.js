@@ -64,6 +64,24 @@ function applyImportPayload(payload) {
   tx(payload || {});
 }
 
+function isFreshBootstrapState() {
+  const userCount = Number(db.prepare('SELECT COUNT(*) as count FROM users').get()?.count || 0);
+  const dataTables = [
+    'classes',
+    'students',
+    'subjects',
+    'student_subjects',
+    'exams',
+    'exam_results',
+    'user_class_assignments',
+  ];
+  const hasAcademicData = dataTables.some((table) => {
+    const count = Number(db.prepare(`SELECT COUNT(*) as count FROM ${table}`).get()?.count || 0);
+    return count > 0;
+  });
+  return userCount <= 1 && !hasAcademicData;
+}
+
 router.get('/export', authenticateToken, (req, res) => {
   if (!ensureAdmin(req, res)) return;
   const data = exportTables();
@@ -75,22 +93,19 @@ router.get('/export', authenticateToken, (req, res) => {
 });
 
 router.post('/import-bootstrap', (req, res) => {
-  const existingUsers = Number(db.prepare('SELECT COUNT(*) as count FROM users').get()?.count || 0);
-  if (existingUsers > 0) {
-    return authenticateToken(req, res, () => {
-      if (!ensureAdmin(req, res)) return;
-      const { data } = req.body || {};
-      if (!data || typeof data !== 'object') {
-        return res.status(400).json({ error: 'Invalid migration payload' });
-      }
-      applyImportPayload(data);
-      return res.json({ message: 'Migration import completed' });
-    });
-  }
   const { data } = req.body || {};
   if (!data || typeof data !== 'object') {
     return res.status(400).json({ error: 'Invalid migration payload' });
   }
+
+  if (!isFreshBootstrapState()) {
+    return authenticateToken(req, res, () => {
+      if (!ensureAdmin(req, res)) return;
+      applyImportPayload(data);
+      return res.json({ message: 'Migration import completed' });
+    });
+  }
+
   applyImportPayload(data);
   return res.json({ message: 'Bootstrap import completed' });
 });

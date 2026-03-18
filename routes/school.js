@@ -3,8 +3,9 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import db from '../db/database.js';
+import db, { resetEducationData } from '../db/database.js';
 import { authenticateToken, getAssignedClassIds, isAdminUser, requireRole } from '../middleware/auth.js';
+import { isSupportedGradingSystem, normalizeCountry, SUPPORTED_COUNTRIES } from '../utils/education.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -61,6 +62,15 @@ const uploadLogo = multer({
 router.get('/info', (req, res) => {
   const schoolInfo = db.prepare('SELECT * FROM school_info WHERE id = 1').get();
   res.json({ school: schoolInfo });
+});
+
+router.get('/education', (req, res) => {
+  const schoolInfo = db.prepare('SELECT school_id, country FROM school_info WHERE id = 1').get();
+  res.json({
+    school_id: schoolInfo?.school_id || null,
+    country: normalizeCountry(schoolInfo?.country),
+    supported_countries: SUPPORTED_COUNTRIES,
+  });
 });
 
 // Update school info
@@ -238,9 +248,9 @@ router.get('/stats', authenticateToken, (req, res) => {
 
 // Get grading criteria
 router.get('/grading', authenticateToken, (req, res) => {
-  const system = req.query.system || 'normal';
+  const system = String(req.query.system || 'normal');
 
-  if (!['normal', 'msce'].includes(system)) {
+  if (!isSupportedGradingSystem(system)) {
     return res.status(400).json({ error: 'Invalid grading system' });
   }
 
@@ -259,7 +269,7 @@ router.put('/grading', authenticateToken, requireRole('admin', 'secretary'), (re
   try {
     const { criteria, system = 'normal' } = req.body;
 
-    if (!['normal', 'msce'].includes(system)) {
+    if (!isSupportedGradingSystem(system)) {
       return res.status(400).json({ error: 'Invalid grading system' });
     }
 
@@ -305,6 +315,21 @@ router.put('/grading', authenticateToken, requireRole('admin', 'secretary'), (re
   } catch (error) {
     next(error);
   }
+});
+
+// Switch country (admin only) - wipes all data and resets defaults
+router.post('/switch-country', authenticateToken, requireRole('admin'), (req, res) => {
+  const nextCountry = normalizeCountry(req.body?.country);
+  if (!SUPPORTED_COUNTRIES.includes(nextCountry)) {
+    return res.status(400).json({ error: 'Unsupported country' });
+  }
+
+  const result = resetEducationData(nextCountry);
+  const schoolInfo = db.prepare('SELECT * FROM school_info WHERE id = 1').get();
+  return res.json({
+    message: `Country switched to ${result.country}. Data reset completed.`,
+    school: schoolInfo,
+  });
 });
 
 export default router;

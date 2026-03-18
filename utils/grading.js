@@ -1,4 +1,5 @@
 import db from '../db/database.js';
+import { getFallbackGrade, isPointBasedSystem } from './education.js';
 
 function normalizeCriteria(rows = []) {
   return rows
@@ -14,10 +15,10 @@ function normalizeCriteria(rows = []) {
 }
 
 function defaultFallback(system) {
-  if (system === 'msce') {
-    return { grade: '9', points: 9, remark: 'Fail' };
+  if (isPointBasedSystem(system)) {
+    return getFallbackGrade(system);
   }
-  return { grade: 'F', points: null, remark: 'Fail' };
+  return getFallbackGrade(system);
 }
 
 export function getGradeCriteria(system = 'normal', customCriteria = null) {
@@ -88,11 +89,30 @@ function hasPointBasedResults(results = []) {
   return results.every((row) => Number.isFinite(Number(row.points)));
 }
 
+function isEnglishSubject(row) {
+  const code = String(row?.subject_code || '').trim().toUpperCase();
+  const name = String(row?.subject_name || '').trim().toLowerCase();
+  return code === 'ENG' || name === 'english';
+}
+
+function calculateBestSixPoints(results = []) {
+  const rows = (results || []).filter((row) => Number.isFinite(Number(row.points)));
+  if (!rows.length) return null;
+  const english = rows.find(isEnglishSubject) || null;
+  const others = rows.filter((row) => !isEnglishSubject(row)).sort((a, b) => Number(a.points) - Number(b.points));
+  const selected = english ? [english, ...others.slice(0, 5)] : others.slice(0, 6);
+  if (!selected.length) return null;
+  return selected.reduce((sum, row) => sum + Number(row.points || 0), 0);
+}
+
 export function calculateStudentResults(examId, studentId) {
   const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(examId);
   if (!exam) {
     return { results: [], totalScore: 0, averageScore: 0, subjectCount: 0 };
   }
+  const componentExam = exam.component_exam_id
+    ? db.prepare('SELECT id, type, max_score FROM exams WHERE id = ?').get(exam.component_exam_id)
+    : null;
   const profileMap = loadExamSubjectProfiles(examId);
 
   const currentRows = db.prepare(`
@@ -111,8 +131,9 @@ export function calculateStudentResults(examId, studentId) {
       return {
         ...row,
         grading_system: subjectGrading.gradingSystem,
-        grade: row.grade || gradeInfo.grade,
-        points: row.points ?? gradeInfo.points,
+        grade: gradeInfo.grade,
+        points: gradeInfo.points,
+        remark: gradeInfo.remark,
       };
     });
 
@@ -149,7 +170,20 @@ export function calculateStudentResults(examId, studentId) {
     }
     const currentScore = Number(current?.score ?? 0);
     const componentScore = Number(component?.score ?? 0);
-    const finalScore = Number(((componentScore * componentWeight) / 100 + (currentScore * currentWeight) / 100).toFixed(2));
+    const useEndTermComposite =
+      exam.type === 'endterm' &&
+      componentExam &&
+      componentExam.type === 'midterm';
+    let finalScore;
+    if (useEndTermComposite) {
+      const componentExamMax = Math.max(0, Number(componentExam.max_score || 0));
+      const currentExamMax = Math.max(1, Number(exam.max_score || 100));
+      const remaining = Math.max(0, 100 - componentExamMax);
+      const convertedCurrent = (currentScore / currentExamMax) * remaining;
+      finalScore = Number((componentScore + convertedCurrent).toFixed(2));
+    } else {
+      finalScore = Number(((componentScore * componentWeight) / 100 + (currentScore * currentWeight) / 100).toFixed(2));
+    }
     const subjectGrading = resolveSubjectGrading(profileMap, subjectId, exam.grading_system);
     const gradeInfo = getGrade(finalScore, subjectGrading.gradingSystem, subjectGrading.customCriteria);
 
@@ -163,6 +197,7 @@ export function calculateStudentResults(examId, studentId) {
       grading_system: subjectGrading.gradingSystem,
       grade: gradeInfo.grade,
       points: gradeInfo.points,
+      remark: gradeInfo.remark,
     });
   }
 
@@ -196,7 +231,7 @@ export function rankStudentsByExam(examId) {
     const { totalScore, averageScore, subjectCount, results } = calculateStudentResults(examId, student.id);
     const pointsMode = hasPointBasedResults(results);
     const totalPoints = pointsMode
-      ? results.reduce((sum, r) => sum + Number(r.points || 0), 0)
+      ? calculateBestSixPoints(results)
       : null;
 
     return {
@@ -210,11 +245,15 @@ export function rankStudentsByExam(examId) {
     };
   });
 
-  const usePointsForRanking = studentScores.length > 0 && studentScores.every((row) => row.pointsMode);
+  const isMidterm = String(exam.type || '').toLowerCase() === 'midterm';
+  const usePointsForRanking = !isMidterm && studentScores.length > 0 && studentScores.every((row) => row.pointsMode);
   if (usePointsForRanking) {
     studentScores.sort((a, b) => (a.totalPoints || 0) - (b.totalPoints || 0));
   } else {
-    studentScores.sort((a, b) => b.averageScore - a.averageScore);
+    studentScores.sort((a, b) => {
+      if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+      return b.averageScore - a.averageScore;
+    });
   }
 
   let currentRank = 1;
@@ -226,7 +265,7 @@ export function rankStudentsByExam(examId) {
         if (curr.totalPoints !== prev.totalPoints) {
           currentRank = i + 1;
         }
-      } else if (curr.averageScore !== prev.averageScore) {
+      } else if (curr.totalScore !== prev.totalScore) {
         currentRank = i + 1;
       }
     }

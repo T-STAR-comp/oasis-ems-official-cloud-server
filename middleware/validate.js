@@ -1,4 +1,5 @@
 import { body, param, query, validationResult } from 'express-validator';
+import { isSupportedGradingSystem } from '../utils/education.js';
 
 // Middleware to check validation results
 export function handleValidation(req, res, next) {
@@ -190,7 +191,12 @@ export const examValidation = {
       .matches(/^\d{4}$/).withMessage('Year must be a 4-digit number'),
     body('grading_system')
       .optional()
-      .isIn(['normal', 'msce']).withMessage('Invalid grading system'),
+      .custom((value) => {
+        if (!isSupportedGradingSystem(value)) {
+          throw new Error('Invalid grading system');
+        }
+        return true;
+      }),
     body('component_exam_id')
       .optional({ nullable: true })
       .isString().withMessage('Component exam ID must be a string'),

@@ -55,7 +55,7 @@ function drawHeadteacherSignature(doc, signatureValue, x, y, width) {
   const parsedImage = parseImageDataUrl(value);
   if (parsedImage && ['image/png', 'image/jpeg', 'image/jpg'].includes(parsedImage.mimeType)) {
     try {
-      doc.image(parsedImage.buffer, x, y + 14, { fit: [Math.max(80, width - 8), 18], align: 'left' });
+      doc.image(parsedImage.buffer, x, y + 14, { fit: [Math.max(80, width - 8), 28], align: 'left' });
       return;
     } catch {
       // Fall through to text rendering.
@@ -65,7 +65,7 @@ function drawHeadteacherSignature(doc, signatureValue, x, y, width) {
   const fallbackText = /^data:image\//i.test(value)
     ? '____________________'
     : (value || '____________________');
-  doc.fillColor('#0f172a').font('Helvetica').fontSize(10).text(fallbackText, x, y + 14, {
+  doc.fillColor('#0f172a').font('Helvetica').fontSize(10).text(fallbackText, x, y + 18, {
     width: Math.max(80, width - 8),
     ellipsis: true,
   });
@@ -78,10 +78,33 @@ function drawCard(doc, x, y, width, height) {
   doc.restore();
 }
 
+function getReportLabels(country) {
+  const normalized = String(country || '').trim().toLowerCase();
+  if (normalized === 'nigeria') {
+    return {
+      classLabel: 'Class',
+      teacherLabel: 'Class Teacher',
+      termLabel: 'Term / Session',
+    };
+  }
+  return {
+    classLabel: 'Form / Class',
+    teacherLabel: 'Form Teacher',
+    termLabel: 'Term / Academic Year',
+  };
+}
+
 function drawRowBackground(doc, x, y, width, height, color = '#ffffff') {
   doc.save();
   doc.rect(x, y, width, height).fill(color);
   doc.restore();
+}
+
+function getAdaptiveRowHeight(doc, yStart, rowCount, fixedAfterTable, min = 11, max = 20) {
+  const pageBottom = doc.page.height - 24;
+  const usable = Math.max(120, pageBottom - yStart - fixedAfterTable);
+  const raw = Math.floor(usable / Math.max(2, rowCount + 1));
+  return Math.max(min, Math.min(max, raw));
 }
 
 function formatOneDecimal(value) {
@@ -92,6 +115,39 @@ function formatOneDecimal(value) {
 function formatPoints(value) {
   const num = Number(value);
   return Number.isFinite(num) ? String(Math.round(num)) : '-';
+}
+
+function ordinalSuffix(day) {
+  if (day >= 11 && day <= 13) return 'th';
+  if (day % 10 === 1) return 'st';
+  if (day % 10 === 2) return 'nd';
+  if (day % 10 === 3) return 'rd';
+  return 'th';
+}
+
+function formatDisplayDate(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const dt = new Date(raw);
+  if (Number.isNaN(dt.getTime())) return raw;
+  const day = dt.getDate();
+  const month = dt.toLocaleString('en-US', { month: 'long' });
+  const year = dt.getFullYear();
+  return `${day}${ordinalSuffix(day)} ${month} ${year}`;
+}
+
+function getFormTeacherName(classId) {
+  const row = db.prepare(`
+    SELECT COALESCE(u.full_name, u.username) as teacher_name
+    FROM users u
+    JOIN user_class_assignments uca ON uca.user_id = u.id
+    WHERE uca.class_id = ? AND u.role = 'teacher'
+    ORDER BY (
+      SELECT COUNT(*) FROM user_class_assignments x WHERE x.user_id = u.id
+    ) ASC, u.created_at ASC
+    LIMIT 1
+  `).get(classId);
+  return row?.teacher_name || '';
 }
 
 function isEnglishSubject(row) {
@@ -210,7 +266,9 @@ router.get('/student/:studentId/exam/:examId', (req, res) => {
 
   const exam = db.prepare(`
     SELECT e.*, c.name as class_name, c.year as class_year,
-           ce.name as component_exam_name
+           ce.name as component_exam_name,
+           ce.max_score as component_exam_max_score,
+           ce.type as component_exam_type
     FROM exams e
     JOIN classes c ON e.class_id = c.id
     LEFT JOIN exams ce ON e.component_exam_id = ce.id
@@ -272,7 +330,9 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
 
   const exam = db.prepare(`
     SELECT e.*, c.name as class_name, c.year as class_year,
-           ce.name as component_exam_name
+           ce.name as component_exam_name,
+           ce.max_score as component_exam_max_score,
+           ce.type as component_exam_type
     FROM exams e
     JOIN classes c ON e.class_id = c.id
     LEFT JOIN exams ce ON e.component_exam_id = ce.id
@@ -292,6 +352,7 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
   const rankings = rankStudentsByExam(examId);
   const studentRanking = rankings.find(r => r.student.id === studentId);
   const schoolInfo = db.prepare('SELECT * FROM school_info WHERE id = 1').get();
+  const formTeacherName = getFormTeacherName(exam.class_id);
   const logoPath = resolveLogoPath(schoolInfo?.logo);
 
   const allScores = [];
@@ -339,12 +400,12 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
   let y = 24;
 
   // Header card (single logo)
-  drawCard(doc, contentX, y, contentWidth, 120);
+  drawCard(doc, contentX, y, contentWidth, 112);
   if (logoPath) {
     doc.image(logoPath, contentX + 14, y + 16, { fit: [72, 72] });
   }
 
-  doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(20)
+  doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(18)
     .text(schoolInfo.name || 'SCHOOL', contentX + 94, y + 18, { width: contentWidth - 108, align: 'center' });
 
   doc.fillColor('#5b6b80').font('Helvetica').fontSize(11)
@@ -353,52 +414,64 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
     width: contentWidth - 108,
     align: 'center'
   });
-
-  doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(14)
-    .text('SCHOOL REPORT', contentX + 94, y + 86, { width: contentWidth - 108, align: 'center' });
-  doc.fillColor('#5b6b80').font('Helvetica').fontSize(10)
-    .text(`${exam.name} | ${exam.term} ${exam.year}`, contentX + 94, y + 100, { width: contentWidth - 108, align: 'center' });
-  if (Number(exam.component_weight || 0) > 0 && exam.component_exam_name) {
-    doc.text(
-      `${Number(exam.component_weight)}% ${exam.component_exam_name} and ${Number(exam.current_weight || 100)}% ${exam.name}`,
-      contentX + 94,
-      y + 114,
-      { width: contentWidth - 108, align: 'center' }
-    );
+  const headerMotto = String(schoolInfo.motto || '').trim();
+  if (headerMotto) {
+    doc.font('Helvetica-Oblique').text(headerMotto, contentX + 94, y + 78, {
+      width: contentWidth - 108,
+      align: 'center',
+      lineBreak: false,
+      ellipsis: true
+    });
   }
 
-  y += 136;
+  doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(13)
+    .text('SCHOOL REPORT', contentX + 94, y + 90, { width: contentWidth - 108, align: 'center' });
+
+  y += 122;
+
+  const labels = getReportLabels(schoolInfo?.country);
 
   // Student info card
-  drawCard(doc, contentX, y, contentWidth, 76);
+  drawCard(doc, contentX, y, contentWidth, 102);
   doc.fillColor('#4a5a70').font('Helvetica').fontSize(10);
-  doc.text('Form / Class:', contentX + 14, y + 18);
-  doc.fillColor('#0f172a').font('Helvetica-Bold').text(exam.class_name, contentX + 78, y + 18);
-  doc.fillColor('#4a5a70').font('Helvetica').text('Student Name:', contentX + 14, y + 42);
-  doc.fillColor('#0f172a').font('Helvetica-Bold').text(student.name, contentX + 88, y + 42);
+  doc.text(`${labels.classLabel}:`, contentX + 20, y + 20);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text(exam.class_name, contentX + 86, y + 20);
+  doc.fillColor('#4a5a70').font('Helvetica').text('Student Name:', contentX + 20, y + 44);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text(student.name, contentX + 94, y + 44);
+  doc.fillColor('#4a5a70').font('Helvetica').text(`${labels.teacherLabel}:`, contentX + 20, y + 68);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text(formTeacherName || '-', contentX + 94, y + 68);
+  doc.fillColor('#4a5a70').font('Helvetica').text(`${labels.termLabel}:`, contentX + 20, y + 88);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text(`${exam.term} / ${exam.year}`, contentX + 126, y + 88);
 
-  doc.fillColor('#4a5a70').font('Helvetica').text('Position in Class:', contentX + contentWidth / 2, y + 18);
-  doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatRank(studentRanking?.rank || 0), contentX + contentWidth / 2 + 78, y + 18);
-  doc.fillColor('#4a5a70').font('Helvetica').text('Number of Students:', contentX + contentWidth / 2, y + 42);
-  doc.fillColor('#0f172a').font('Helvetica-Bold').text(String(rankings.length), contentX + contentWidth / 2 + 95, y + 42);
+  doc.fillColor('#4a5a70').font('Helvetica').text('Position in Class:', contentX + contentWidth / 2, y + 20);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatRank(studentRanking?.rank || 0), contentX + contentWidth / 2 + 78, y + 20);
+  doc.fillColor('#4a5a70').font('Helvetica').text('Number of Students:', contentX + contentWidth / 2, y + 44);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text(String(rankings.length), contentX + contentWidth / 2 + 95, y + 44);
 
-  y += 94;
+  y += 120;
 
   const componentWeight = Number(exam.component_weight || 0);
   const currentWeight = Number(exam.current_weight || 100);
   const hasComponent = componentWeight > 0 && Boolean(exam.component_exam_name);
+  const isMidterm = String(exam.type || '').toLowerCase() === 'midterm';
+  const useEndTermComposite = String(exam.type || '').toLowerCase() === 'endterm' && String(exam.component_exam_type || '').toLowerCase() === 'midterm';
   const componentLabel = exam.component_exam_name || 'CAT';
   const currentLabel = exam.name || 'Current Exam';
+  const componentExamMax = Math.max(0, Number(exam.component_exam_max_score || 0));
+  const remainingToHundred = Math.max(0, 100 - componentExamMax);
+  const currentExamMax = Math.max(1, Number(exam.max_score || 100));
+  const caPercentLabel = useEndTermComposite ? componentExamMax : componentWeight;
+  const etPercentLabel = useEndTermComposite ? remainingToHundred : currentWeight;
 
   // Academic table card
   const columns = hasComponent
-    ? [
+      ? [
         { key: 'subject', label: 'Subject', width: 95 },
-        { key: 'ca', label: `${componentWeight}% ${componentLabel}`, width: 70 },
-        { key: 'exam', label: `${currentWeight}% ${currentLabel}`, width: 70 },
-        { key: 'final', label: 'Final Mark', width: 55 },
+        { key: 'ca', label: `C/A (${formatOneDecimal(caPercentLabel)}%)`, width: 70 },
+        { key: 'exam', label: `E/T (${formatOneDecimal(etPercentLabel)}%)`, width: 70 },
+        { key: 'final', label: useEndTermComposite ? 'Final Mark (100%)' : 'Final Mark', width: 55 },
         { key: 'position', label: 'Position', width: 45 },
-        { key: 'grade', label: 'Grade', width: 45 },
+        ...(isMidterm ? [] : [{ key: 'grade', label: 'Grade', width: 45 }]),
         { key: 'remark', label: 'Remark', width: 75 },
         { key: 'signature', label: 'Signature', width: 65 }
       ]
@@ -406,15 +479,16 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
         { key: 'subject', label: 'Subject', width: 95 },
         { key: 'score', label: 'Score', width: 70 },
         { key: 'position', label: 'Position', width: 45 },
-        { key: 'grade', label: 'Grade', width: 45 },
+        ...(isMidterm ? [] : [{ key: 'grade', label: 'Grade', width: 45 }]),
         { key: 'remark', label: 'Remark', width: 75 },
         { key: 'signature', label: 'Signature', width: 65 }
       ];
-  const tableX = contentX + 10;
   const tableWidth = columns.reduce((sum, c) => sum + c.width, 0);
-  const rowHeight = 30;
-  const minRows = 8;
-  const tableRows = Math.max(minRows, results.length);
+  const tableX = contentX + ((contentWidth - tableWidth) / 2);
+  const tableRows = Math.max(1, results.length);
+  const compact = tableRows > 10;
+  const fixedAfterTable = compact ? 208 : 230;
+  const rowHeight = getAdaptiveRowHeight(doc, y, tableRows, fixedAfterTable, compact ? 9 : 11, compact ? 17 : 19);
   const tableHeight = rowHeight * (tableRows + 1);
 
   drawCard(doc, contentX, y, contentWidth, tableHeight + 18);
@@ -436,19 +510,27 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
     const result = results[row];
     if (!result) continue;
 
-    const gradeInfo = getGrade(result.score, exam.grading_system);
+    const gradeInfo = getGrade(result.score, result.grading_system || exam.grading_system);
     const subjectRank = subjectRankMaps.get(result.subject_id)?.get(studentId) || 0;
-    const gradeDisplay = exam.grading_system === 'msce' ? String(result.points ?? gradeInfo.points ?? '-') : (result.grade || gradeInfo.grade);
-    const remarkDisplay = exam.grading_system === 'msce' ? gradeInfo.remark : (result.remark || gradeInfo.remark);
+    const gradeDisplay = isMidterm
+      ? '-'
+      : (exam.grading_system === 'msce' ? String(result.points ?? gradeInfo.points ?? '-') : (result.grade || gradeInfo.grade));
+    const remarkDisplay = result.remark || gradeInfo.remark || '';
+    const caValue = useEndTermComposite
+      ? Number(result.component_score || 0).toFixed(1)
+      : ((Number(result.component_score || 0) * componentWeight) / 100).toFixed(1);
+    const currentValue = useEndTermComposite
+      ? ((Number(result.current_score || 0) / currentExamMax) * remainingToHundred).toFixed(1)
+      : ((Number(result.current_score || result.score) * currentWeight) / 100).toFixed(1);
 
     const values = hasComponent
       ? [
           result.subject_name,
-          ((Number(result.component_score || 0) * componentWeight) / 100).toFixed(1),
-          ((Number(result.current_score || result.score) * currentWeight) / 100).toFixed(1),
+          caValue,
+          currentValue,
           result.score.toFixed(1),
           subjectRank > 0 ? formatRank(subjectRank) : '-',
-          gradeDisplay,
+          ...(isMidterm ? [] : [gradeDisplay]),
           remarkDisplay,
           String(subjectTeacherMap.get(result.subject_id) || '__________')
         ]
@@ -456,7 +538,7 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
           result.subject_name,
           result.score.toFixed(1),
           subjectRank > 0 ? formatRank(subjectRank) : '-',
-          gradeDisplay,
+          ...(isMidterm ? [] : [gradeDisplay]),
           remarkDisplay,
           String(subjectTeacherMap.get(result.subject_id) || '__________')
         ];
@@ -464,64 +546,74 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
     colX = tableX;
     doc.fillColor('#0f172a').font('Helvetica').fontSize(10);
     values.forEach((value, index) => {
-      const align = index > 0 && index < (hasComponent ? 6 : 4) ? 'center' : 'left';
-      doc.text(String(value), colX + 4, rowY + 10, { width: columns[index].width - 8, align });
+      const align = index > 0 && index < (hasComponent ? (isMidterm ? 5 : 6) : (isMidterm ? 3 : 4)) ? 'center' : 'left';
+      doc.text(String(value), colX + 4, rowY + 4, { width: columns[index].width - 8, align });
       colX += columns[index].width;
     });
   }
 
-  y += tableHeight + 30;
+  const gapAfterTable = compact ? 22 : 26;
+  y += tableHeight + gapAfterTable;
 
   // Legend + Summary cards
   const split = 10;
   const blockWidth = (contentWidth - split) / 2;
-  drawCard(doc, contentX, y, blockWidth, 140);
-  drawCard(doc, contentX + blockWidth + split, y, blockWidth, 140);
+  const summaryBlockHeight = compact ? 102 : 112;
+  drawCard(doc, contentX, y, blockWidth, summaryBlockHeight);
+  drawCard(doc, contentX + blockWidth + split, y, blockWidth, summaryBlockHeight);
 
-  doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(12).text('Grading Key / Legend', contentX + 14, y + 14);
-  doc.fillColor('#0f172a').font('Helvetica').fontSize(9);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(11).text('Grading Key', contentX + 14, y + 12);
+  doc.fillColor('#0f172a').font('Helvetica').fontSize(8);
 
-  let legendY = y + 36;
-  criteria.forEach((item) => {
-    const text = exam.grading_system === 'msce'
-      ? `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${formatPoints(item.points)} point${item.points > 1 ? 's' : ''} (${item.remark})`
-      : `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${item.grade} (${item.remark})`;
-    doc.text(text, contentX + 14, legendY, { width: blockWidth - 24 });
-    legendY += 18;
-  });
-
-  const summaryX = contentX + blockWidth + split + 14;
-  doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(12).text('Summary & Remarks', summaryX, y + 14);
-  doc.fillColor('#4a5a70').font('Helvetica').fontSize(10);
-  doc.text('Total Marks:', summaryX, y + 40);
-  doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatOneDecimal(totalScore), summaryX + 72, y + 40);
-
-  if (exam.grading_system === 'msce') {
-    doc.fillColor('#4a5a70').font('Helvetica').text('Overall Points:', summaryX, y + 64);
-    doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatPoints(studentRanking?.totalPoints), summaryX + 78, y + 64);
+  if (isMidterm) {
+    doc.text('Mid-term reports are ranking-only.', contentX + 14, y + 48, { width: blockWidth - 24, align: 'center' });
   } else {
-    doc.fillColor('#4a5a70').font('Helvetica').text('Overall Grade:', summaryX, y + 64);
-    doc.fillColor('#0f172a').font('Helvetica-Bold').text(`${overallGrade.grade}`, summaryX + 74, y + 64);
+    let legendY = y + 30;
+    criteria.forEach((item) => {
+      const text = exam.grading_system === 'msce'
+        ? `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${formatPoints(item.points)} pt`
+        : `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${item.grade}`;
+      if (legendY > y + (compact ? 88 : 96)) return;
+      doc.text(text, contentX + 14, legendY, { width: blockWidth - 24 });
+      legendY += 12;
+    });
   }
 
-  doc.fillColor('#4a5a70').font('Helvetica').text("Teacher's Remarks:", summaryX, y + 88);
-  doc.fillColor('#0f172a').font('Helvetica-Bold').text(passFail.status, summaryX + 98, y + 88);
-  doc.fillColor('#4a5a70').font('Helvetica').text("Head Teacher's Remarks:", summaryX, y + 112);
-  doc.fillColor('#0f172a').font('Helvetica-Bold').text('____________________', summaryX + 125, y + 112);
+  const summaryX = contentX + blockWidth + split + 14;
+  doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(11).text('Summary & Remarks', summaryX, y + 12, { width: blockWidth - 28, align: 'center' });
+  doc.fillColor('#4a5a70').font('Helvetica').fontSize(10);
+  doc.text('Total Marks:', summaryX, y + 32);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatOneDecimal(totalScore), summaryX + 72, y + 32);
 
-  y += 152;
+  if (!isMidterm && exam.grading_system === 'msce') {
+    doc.fillColor('#4a5a70').font('Helvetica').text('Overall Points:', summaryX, y + 54);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatPoints(studentRanking?.totalPoints), summaryX + 78, y + 54);
+  } else if (!isMidterm) {
+    doc.fillColor('#4a5a70').font('Helvetica').text('Overall Grade:', summaryX, y + 54);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(`${overallGrade.grade}`, summaryX + 74, y + 54);
+  } else {
+    doc.fillColor('#4a5a70').font('Helvetica').text('Overall Grade:', summaryX, y + 54);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text('N/A (Mid Term)', summaryX + 74, y + 54);
+  }
+
+  doc.fillColor('#4a5a70').font('Helvetica').text('Remarks:', summaryX, y + 76);
+  doc.fillColor('#0f172a').font('Helvetica-Bold').text(passFail.status, summaryX + 98, y + 76);
+
+  y += compact ? 112 : 122;
 
   // Footer card
   drawCard(doc, contentX, y, contentWidth, 92);
   doc.fillColor('#4a5a70').font('Helvetica').fontSize(10);
-  doc.text(`Next Term Opening Date: ${schoolInfo.opening_date || '____________________'}`, contentX + 14, y + 20);
-  doc.text(`School Fees: ${schoolInfo.school_fees || '____________________'}`, contentX + 14, y + 44);
-  doc.text('School Stamp: ____________________', contentX + 14, y + 68);
+  if (!isMidterm) {
+    doc.text(`Next Term Opening Date: ${formatDisplayDate(schoolInfo.opening_date) || '____________________'}`, contentX + 14, y + 20);
+    doc.text(`School Fees: ${schoolInfo.school_fees || '____________________'}`, contentX + 14, y + 44);
+    doc.text(`Head Teacher Name: ${schoolInfo.headteacher_name || '____________________'}`, contentX + 14, y + 68);
+  } else {
+    doc.text(`Head Teacher Name: ${schoolInfo.headteacher_name || '____________________'}`, contentX + 14, y + 44);
+  }
 
   const footerRightX = contentX + contentWidth / 2;
   drawHeadteacherSignature(doc, schoolInfo.headteacher_signature, footerRightX, y + 20, contentWidth / 2 - 16);
-  doc.text('Class Teacher Signature: ____________________', footerRightX, y + 44);
-  doc.text(`Motto: ${schoolInfo.motto || '-'}`, footerRightX, y + 68);
 
   doc.end();
 });
@@ -532,7 +624,9 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
 
   const exam = db.prepare(`
     SELECT e.*, c.name as class_name, c.year as class_year,
-           ce.name as component_exam_name
+           ce.name as component_exam_name,
+           ce.max_score as component_exam_max_score,
+           ce.type as component_exam_type
     FROM exams e
     JOIN classes c ON e.class_id = c.id
     LEFT JOIN exams ce ON e.component_exam_id = ce.id
@@ -546,6 +640,7 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
 
   const rankings = rankStudentsByExam(examId);
   const schoolInfo = db.prepare('SELECT * FROM school_info WHERE id = 1').get();
+  const formTeacherName = getFormTeacherName(exam.class_id);
   const logoPath = resolveLogoPath(schoolInfo?.logo);
   const criteria = db.prepare(`
     SELECT grade, min_score, max_score, points, remark
@@ -573,6 +668,19 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
   });
   const subjectRankMaps = buildSubjectRankMaps(allScores);
 
+  const componentWeight = Number(exam.component_weight || 0);
+  const currentWeight = Number(exam.current_weight || 100);
+  const hasComponent = componentWeight > 0 && Boolean(exam.component_exam_name);
+  const isMidterm = String(exam.type || '').toLowerCase() === 'midterm';
+  const useEndTermComposite = String(exam.type || '').toLowerCase() === 'endterm' && String(exam.component_exam_type || '').toLowerCase() === 'midterm';
+  const componentLabel = exam.component_exam_name || 'CAT';
+  const currentLabel = exam.name || 'Current Exam';
+  const componentExamMax = Math.max(0, Number(exam.component_exam_max_score || 0));
+  const remainingToHundred = Math.max(0, 100 - componentExamMax);
+  const currentExamMax = Math.max(1, Number(exam.max_score || 100));
+  const caPercentLabel = useEndTermComposite ? componentExamMax : componentWeight;
+  const etPercentLabel = useEndTermComposite ? remainingToHundred : currentWeight;
+
   const doc = new PDFDocument({ margin: 24, size: 'A4' });
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${exam.class_name}_${exam.name}_student_reports.pdf"`);
@@ -596,11 +704,11 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
     const contentWidth = pageWidth - 48;
     let y = 24;
 
-    drawCard(doc, contentX, y, contentWidth, 120);
+    drawCard(doc, contentX, y, contentWidth, 112);
     if (logoPath) {
       doc.image(logoPath, contentX + 14, y + 16, { fit: [72, 72] });
     }
-    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(20)
+    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(18)
       .text(schoolInfo.name || 'SCHOOL', contentX + 94, y + 18, { width: contentWidth - 108, align: 'center' });
     doc.fillColor('#5b6b80').font('Helvetica').fontSize(11)
       .text(schoolInfo.address || '', contentX + 94, y + 46, { width: contentWidth - 108, align: 'center' });
@@ -608,35 +716,45 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
       width: contentWidth - 108,
       align: 'center'
     });
-    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(14)
-      .text('SCHOOL REPORT', contentX + 94, y + 86, { width: contentWidth - 108, align: 'center' });
-    doc.fillColor('#5b6b80').font('Helvetica').fontSize(10)
-      .text(`${exam.name} | ${exam.term} ${exam.year}`, contentX + 94, y + 100, { width: contentWidth - 108, align: 'center' });
+    const headerMotto = String(schoolInfo.motto || '').trim();
+    if (headerMotto) {
+      doc.font('Helvetica-Oblique').text(headerMotto, contentX + 94, y + 78, {
+        width: contentWidth - 108,
+        align: 'center',
+        lineBreak: false,
+        ellipsis: true
+      });
+    }
+    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(13)
+      .text('SCHOOL REPORT', contentX + 94, y + 90, { width: contentWidth - 108, align: 'center' });
 
-    y += 136;
-    drawCard(doc, contentX, y, contentWidth, 76);
+    y += 122;
+    const labels = getReportLabels(schoolInfo?.country);
+    drawCard(doc, contentX, y, contentWidth, 102);
     doc.fillColor('#4a5a70').font('Helvetica').fontSize(10);
-    doc.text('Form / Class:', contentX + 14, y + 18);
-    doc.fillColor('#0f172a').font('Helvetica-Bold').text(exam.class_name, contentX + 78, y + 18);
-    doc.fillColor('#4a5a70').font('Helvetica').text('Student Name:', contentX + 14, y + 42);
-    doc.fillColor('#0f172a').font('Helvetica-Bold').text(student.name, contentX + 88, y + 42);
-    doc.fillColor('#4a5a70').font('Helvetica').text('Position in Class:', contentX + contentWidth / 2, y + 18);
-    doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatRank(entry.rank || 0), contentX + contentWidth / 2 + 78, y + 18);
-    doc.fillColor('#4a5a70').font('Helvetica').text('Number of Students:', contentX + contentWidth / 2, y + 42);
-    doc.fillColor('#0f172a').font('Helvetica-Bold').text(String(rankings.length), contentX + contentWidth / 2 + 95, y + 42);
+    doc.text(`${labels.classLabel}:`, contentX + 20, y + 20);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(exam.class_name, contentX + 86, y + 20);
+    doc.fillColor('#4a5a70').font('Helvetica').text('Student Name:', contentX + 20, y + 44);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(student.name, contentX + 94, y + 44);
+    doc.fillColor('#4a5a70').font('Helvetica').text(`${labels.teacherLabel}:`, contentX + 20, y + 68);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(formTeacherName || '-', contentX + 94, y + 68);
+    doc.fillColor('#4a5a70').font('Helvetica').text(`${labels.termLabel}:`, contentX + 20, y + 88);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(`${exam.term} / ${exam.year}`, contentX + 126, y + 88);
 
-    y += 94;
-    const componentWeight = Number(exam.component_weight || 0);
-    const currentWeight = Number(exam.current_weight || 100);
-    const hasComponent = componentWeight > 0 && Boolean(exam.component_exam_name);
+    doc.fillColor('#4a5a70').font('Helvetica').text('Position in Class:', contentX + contentWidth / 2, y + 20);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatRank(entry.rank || 0), contentX + contentWidth / 2 + 78, y + 20);
+    doc.fillColor('#4a5a70').font('Helvetica').text('Number of Students:', contentX + contentWidth / 2, y + 44);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(String(rankings.length), contentX + contentWidth / 2 + 95, y + 44);
+
+    y += 120;
     const columns = hasComponent
       ? [
           { key: 'subject', label: 'Subject', width: 95 },
-          { key: 'ca', label: `${componentWeight}%`, width: 70 },
-          { key: 'exam', label: `${currentWeight}%`, width: 70 },
-          { key: 'final', label: 'Final Mark', width: 55 },
+          { key: 'ca', label: `C/A (${formatOneDecimal(caPercentLabel)}%)`, width: 70 },
+          { key: 'exam', label: `E/T (${formatOneDecimal(etPercentLabel)}%)`, width: 70 },
+          { key: 'final', label: useEndTermComposite ? 'Final Mark (100%)' : 'Final Mark', width: 55 },
           { key: 'position', label: 'Position', width: 45 },
-          { key: 'grade', label: 'Grade', width: 45 },
+          ...(isMidterm ? [] : [{ key: 'grade', label: 'Grade', width: 45 }]),
           { key: 'remark', label: 'Remark', width: 75 },
           { key: 'signature', label: 'Signature', width: 65 }
         ]
@@ -644,14 +762,16 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
           { key: 'subject', label: 'Subject', width: 95 },
           { key: 'score', label: 'Score', width: 70 },
           { key: 'position', label: 'Position', width: 45 },
-          { key: 'grade', label: 'Grade', width: 45 },
+          ...(isMidterm ? [] : [{ key: 'grade', label: 'Grade', width: 45 }]),
           { key: 'remark', label: 'Remark', width: 75 },
           { key: 'signature', label: 'Signature', width: 65 }
         ];
-    const tableX = contentX + 10;
     const tableWidth = columns.reduce((sum, c) => sum + c.width, 0);
-    const rowHeight = 30;
-    const tableRows = Math.max(8, results.length);
+    const tableX = contentX + ((contentWidth - tableWidth) / 2);
+    const tableRows = Math.max(1, results.length);
+    const compact = tableRows > 10;
+    const fixedAfterTable = compact ? 208 : 230;
+    const rowHeight = getAdaptiveRowHeight(doc, y, tableRows, fixedAfterTable, compact ? 9 : 11, compact ? 17 : 19);
     const tableHeight = rowHeight * (tableRows + 1);
 
     drawCard(doc, contentX, y, contentWidth, tableHeight + 18);
@@ -669,18 +789,26 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
       doc.strokeColor('#e2e8f0').lineWidth(0.6).moveTo(tableX, rowY).lineTo(tableX + tableWidth, rowY).stroke();
       const result = results[row];
       if (!result) continue;
-      const gradeInfo = getGrade(result.score, exam.grading_system);
+      const gradeInfo = getGrade(result.score, result.grading_system || exam.grading_system);
       const subjectRank = subjectRankMaps.get(result.subject_id)?.get(student.id) || 0;
-      const gradeDisplay = exam.grading_system === 'msce' ? String(result.points ?? gradeInfo.points ?? '-') : (result.grade || gradeInfo.grade);
-      const remarkDisplay = exam.grading_system === 'msce' ? gradeInfo.remark : (result.remark || gradeInfo.remark);
+      const gradeDisplay = isMidterm
+        ? '-'
+        : (exam.grading_system === 'msce' ? String(result.points ?? gradeInfo.points ?? '-') : (result.grade || gradeInfo.grade));
+      const remarkDisplay = result.remark || gradeInfo.remark || '';
+      const caValue = useEndTermComposite
+        ? Number(result.component_score || 0).toFixed(1)
+        : ((Number(result.component_score || 0) * componentWeight) / 100).toFixed(1);
+      const currentValue = useEndTermComposite
+        ? ((Number(result.current_score || 0) / currentExamMax) * remainingToHundred).toFixed(1)
+        : ((Number(result.current_score || result.score) * currentWeight) / 100).toFixed(1);
       const values = hasComponent
         ? [
             result.subject_name,
-            ((Number(result.component_score || 0) * componentWeight) / 100).toFixed(1),
-            ((Number(result.current_score || result.score) * currentWeight) / 100).toFixed(1),
+            caValue,
+            currentValue,
             result.score.toFixed(1),
             subjectRank > 0 ? formatRank(subjectRank) : '-',
-            gradeDisplay,
+            ...(isMidterm ? [] : [gradeDisplay]),
             remarkDisplay,
             String(subjectTeacherMap.get(result.subject_id) || '__________')
           ]
@@ -688,61 +816,73 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
             result.subject_name,
             result.score.toFixed(1),
             subjectRank > 0 ? formatRank(subjectRank) : '-',
-            gradeDisplay,
+            ...(isMidterm ? [] : [gradeDisplay]),
             remarkDisplay,
             String(subjectTeacherMap.get(result.subject_id) || '__________')
           ];
       colX = tableX;
       doc.fillColor('#0f172a').font('Helvetica').fontSize(10);
       values.forEach((value, colIndex) => {
-        const align = colIndex > 0 && colIndex < (hasComponent ? 6 : 4) ? 'center' : 'left';
-        doc.text(String(value), colX + 4, rowY + 10, { width: columns[colIndex].width - 8, align });
+        const align = colIndex > 0 && colIndex < (hasComponent ? (isMidterm ? 5 : 6) : (isMidterm ? 3 : 4)) ? 'center' : 'left';
+        doc.text(String(value), colX + 4, rowY + 4, { width: columns[colIndex].width - 8, align });
         colX += columns[colIndex].width;
       });
     }
 
-    y += tableHeight + 30;
+    const gapAfterTable = compact ? 22 : 26;
+    y += tableHeight + gapAfterTable;
     const split = 10;
     const blockWidth = (contentWidth - split) / 2;
-    drawCard(doc, contentX, y, blockWidth, 140);
-    drawCard(doc, contentX + blockWidth + split, y, blockWidth, 140);
-    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(12).text('Grading Key / Legend', contentX + 14, y + 14);
-    doc.fillColor('#0f172a').font('Helvetica').fontSize(9);
-    let legendY = y + 36;
-    criteria.forEach((item) => {
-      const text = exam.grading_system === 'msce'
-        ? `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${formatPoints(item.points)} point${item.points > 1 ? 's' : ''} (${item.remark})`
-        : `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${item.grade} (${item.remark})`;
-      doc.text(text, contentX + 14, legendY, { width: blockWidth - 24 });
-      legendY += 18;
-    });
-    const summaryX = contentX + blockWidth + split + 14;
-    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(12).text('Summary & Remarks', summaryX, y + 14);
-    doc.fillColor('#4a5a70').font('Helvetica').fontSize(10);
-    doc.text('Total Marks:', summaryX, y + 40);
-    doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatOneDecimal(totalScore), summaryX + 72, y + 40);
-    if (exam.grading_system === 'msce') {
-      doc.fillColor('#4a5a70').font('Helvetica').text('Overall Points:', summaryX, y + 64);
-      doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatPoints(entry.totalPoints), summaryX + 78, y + 64);
+    const summaryBlockHeight = compact ? 102 : 112;
+    drawCard(doc, contentX, y, blockWidth, summaryBlockHeight);
+    drawCard(doc, contentX + blockWidth + split, y, blockWidth, summaryBlockHeight);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(11).text('Grading Key', contentX + 14, y + 12);
+    doc.fillColor('#0f172a').font('Helvetica').fontSize(8);
+    if (isMidterm) {
+      doc.text('Mid-term reports are ranking-only.', contentX + 14, y + 48, { width: blockWidth - 24, align: 'center' });
     } else {
-      doc.fillColor('#4a5a70').font('Helvetica').text('Overall Grade:', summaryX, y + 64);
-      doc.fillColor('#0f172a').font('Helvetica-Bold').text(`${overallGrade.grade}`, summaryX + 74, y + 64);
+      let legendY = y + 30;
+      criteria.forEach((item) => {
+        const text = exam.grading_system === 'msce'
+          ? `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${formatPoints(item.points)} pt`
+          : `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${item.grade}`;
+        if (legendY > y + (compact ? 88 : 96)) return;
+        doc.text(text, contentX + 14, legendY, { width: blockWidth - 24 });
+        legendY += 12;
+      });
     }
-    doc.fillColor('#4a5a70').font('Helvetica').text("Teacher's Remarks:", summaryX, y + 88);
-    doc.fillColor('#0f172a').font('Helvetica-Bold').text(passFail.status, summaryX + 98, y + 88);
-    doc.fillColor('#4a5a70').font('Helvetica').text("Head Teacher's Remarks:", summaryX, y + 112);
-    doc.fillColor('#0f172a').font('Helvetica-Bold').text('____________________', summaryX + 125, y + 112);
 
-    y += 152;
+    const summaryX = contentX + blockWidth + split + 14;
+    doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(11).text('Summary & Remarks', summaryX, y + 12, { width: blockWidth - 28, align: 'center' });
+    doc.fillColor('#4a5a70').font('Helvetica').fontSize(10);
+    doc.text('Total Marks:', summaryX, y + 32);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatOneDecimal(totalScore), summaryX + 72, y + 32);
+    if (!isMidterm && exam.grading_system === 'msce') {
+      doc.fillColor('#4a5a70').font('Helvetica').text('Overall Points:', summaryX, y + 54);
+      doc.fillColor('#0f172a').font('Helvetica-Bold').text(formatPoints(entry.totalPoints), summaryX + 78, y + 54);
+    } else if (!isMidterm) {
+      doc.fillColor('#4a5a70').font('Helvetica').text('Overall Grade:', summaryX, y + 54);
+      doc.fillColor('#0f172a').font('Helvetica-Bold').text(`${overallGrade.grade}`, summaryX + 74, y + 54);
+    } else {
+      doc.fillColor('#4a5a70').font('Helvetica').text('Overall Grade:', summaryX, y + 54);
+      doc.fillColor('#0f172a').font('Helvetica-Bold').text('N/A (Mid Term)', summaryX + 74, y + 54);
+    }
+
+    doc.fillColor('#4a5a70').font('Helvetica').text('Remarks:', summaryX, y + 76);
+    doc.fillColor('#0f172a').font('Helvetica-Bold').text(passFail.status, summaryX + 98, y + 76);
+
+    y += compact ? 112 : 122;
     drawCard(doc, contentX, y, contentWidth, 92);
     doc.fillColor('#4a5a70').font('Helvetica').fontSize(10);
-    doc.text(`Next Term Opening Date: ${schoolInfo.opening_date || '____________________'}`, contentX + 14, y + 20);
-    doc.text(`School Fees: ${schoolInfo.school_fees || '____________________'}`, contentX + 14, y + 44);
-    doc.text('School Stamp: ____________________', contentX + 14, y + 68);
+    if (!isMidterm) {
+      doc.text(`Next Term Opening Date: ${formatDisplayDate(schoolInfo.opening_date) || '____________________'}`, contentX + 14, y + 20);
+      doc.text(`School Fees: ${schoolInfo.school_fees || '____________________'}`, contentX + 14, y + 44);
+      doc.text(`Head Teacher Name: ${schoolInfo.headteacher_name || '____________________'}`, contentX + 14, y + 68);
+    } else {
+      doc.text(`Head Teacher Name: ${schoolInfo.headteacher_name || '____________________'}`, contentX + 14, y + 44);
+    }
     const footerRightX = contentX + contentWidth / 2;
     drawHeadteacherSignature(doc, schoolInfo.headteacher_signature, footerRightX, y + 20, contentWidth / 2 - 16);
-    doc.text('Class Teacher Signature: ____________________', footerRightX, y + 44);
-    doc.text(`Motto: ${schoolInfo.motto || '-'}`, footerRightX, y + 68);
   });
 
   doc.end();
@@ -754,7 +894,9 @@ router.get('/class/:classId/exam/:examId', (req, res) => {
 
   const exam = db.prepare(`
     SELECT e.*, c.name as class_name, c.year as class_year,
-           ce.name as component_exam_name
+           ce.name as component_exam_name,
+           ce.max_score as component_exam_max_score,
+           ce.type as component_exam_type
     FROM exams e
     JOIN classes c ON e.class_id = c.id
     LEFT JOIN exams ce ON e.component_exam_id = ce.id
@@ -768,6 +910,7 @@ router.get('/class/:classId/exam/:examId', (req, res) => {
 
   const rankings = rankStudentsByExam(examId);
   const schoolInfo = db.prepare('SELECT * FROM school_info WHERE id = 1').get();
+  const formTeacherName = getFormTeacherName(exam.class_id);
 
   // Get subjects
   const subjects = db.prepare(
@@ -793,6 +936,7 @@ router.get('/class/:classId/exam/:examId', (req, res) => {
     report: {
       school: schoolInfo,
       exam,
+      formTeacherName,
       weighting: {
         componentExamName: exam.component_exam_name || null,
         componentWeight: Number(exam.component_weight || 0),
@@ -816,7 +960,9 @@ router.get('/class/:classId/exam/:examId/excel', (req, res) => {
 
   const exam = db.prepare(`
     SELECT e.*, c.name as class_name, c.year as class_year,
-           ce.name as component_exam_name
+           ce.name as component_exam_name,
+           ce.max_score as component_exam_max_score,
+           ce.type as component_exam_type
     FROM exams e
     JOIN classes c ON e.class_id = c.id
     LEFT JOIN exams ce ON e.component_exam_id = ce.id
@@ -873,7 +1019,9 @@ router.get('/class/:classId/exam/:examId/pdf', (req, res) => {
 
   const exam = db.prepare(`
     SELECT e.*, c.name as class_name, c.year as class_year,
-           ce.name as component_exam_name
+           ce.name as component_exam_name,
+           ce.max_score as component_exam_max_score,
+           ce.type as component_exam_type
     FROM exams e
     JOIN classes c ON e.class_id = c.id
     LEFT JOIN exams ce ON e.component_exam_id = ce.id
@@ -915,15 +1063,7 @@ router.get('/class/:classId/exam/:examId/pdf', (req, res) => {
     .text(schoolInfo.name || 'SCHOOL', contentX + 78, y + 16, { width: contentWidth - 92 });
   doc.fillColor('#5b6b80').font('Helvetica').fontSize(11)
     .text(`${exam.class_name} - ${exam.name}`, contentX + 78, y + 44, { width: contentWidth - 92 });
-  doc.text(`${exam.term} ${exam.year}`, contentX + 78, y + 64, { width: contentWidth - 92 });
-  if (Number(exam.component_weight || 0) > 0 && exam.component_exam_name) {
-    doc.text(
-      `${Number(exam.component_weight)}% ${exam.component_exam_name} and ${Number(exam.current_weight || 100)}% ${exam.name}`,
-      contentX + 78,
-      y + 78,
-      { width: contentWidth - 92 }
-    );
-  }
+  doc.text('', contentX + 78, y + 64, { width: contentWidth - 92 });
 
   y += 106;
 
@@ -1010,5 +1150,8 @@ router.get('/class/:classId/exam/:examId/pdf', (req, res) => {
 });
 
 export default router;
+
+
+
 
 

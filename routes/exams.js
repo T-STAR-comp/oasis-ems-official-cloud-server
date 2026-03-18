@@ -4,6 +4,7 @@ import db from '../db/database.js';
 import { authenticateToken, ensureClassAccess, getAssignedClassIds, isAdminUser } from '../middleware/auth.js';
 import { examValidation, idValidation } from '../middleware/validate.js';
 import { getGrade, rankStudentsByExam, getGradeCriteria } from '../utils/grading.js';
+import { ALL_GRADING_SYSTEMS, isSupportedGradingSystem } from '../utils/education.js';
 
 const router = express.Router();
 
@@ -71,6 +72,18 @@ router.get('/', (req, res) => {
   let query = `
     SELECT e.*, c.name as class_name, c.year as class_year,
       ce.name as component_exam_name,
+      ce.max_score as component_exam_max_score,
+      ce.type as component_exam_type,
+      (
+        SELECT COALESCE(u.full_name, u.username)
+        FROM users u
+        JOIN user_class_assignments uca ON uca.user_id = u.id
+        WHERE uca.class_id = e.class_id AND u.role = 'teacher'
+        ORDER BY (
+          SELECT COUNT(*) FROM user_class_assignments x WHERE x.user_id = u.id
+        ) ASC, u.created_at ASC
+        LIMIT 1
+      ) as form_teacher_name,
       (SELECT COUNT(DISTINCT student_id) FROM exam_results WHERE exam_id = e.id) as students_graded
     FROM exams e
     JOIN classes c ON e.class_id = c.id
@@ -100,7 +113,19 @@ router.get('/:id', idValidation, (req, res) => {
 
   const exam = db.prepare(`
     SELECT e.*, c.name as class_name, c.year as class_year,
-           ce.name as component_exam_name
+           ce.name as component_exam_name,
+           ce.max_score as component_exam_max_score,
+           ce.type as component_exam_type,
+           (
+             SELECT COALESCE(u.full_name, u.username)
+             FROM users u
+             JOIN user_class_assignments uca ON uca.user_id = u.id
+             WHERE uca.class_id = e.class_id AND u.role = 'teacher'
+             ORDER BY (
+               SELECT COUNT(*) FROM user_class_assignments x WHERE x.user_id = u.id
+             ) ASC, u.created_at ASC
+             LIMIT 1
+           ) as form_teacher_name
     FROM exams e
     JOIN classes c ON e.class_id = c.id
     LEFT JOIN exams ce ON e.component_exam_id = ce.id
@@ -224,10 +249,10 @@ router.put('/:id/subject-grading', idValidation, (req, res) => {
       if (!subjectId || !classSubjectIds.has(subjectId)) {
         throw new Error(`Invalid subject_id: ${subjectId || '<empty>'}`);
       }
-      if (!['normal', 'msce', 'custom'].includes(gradingSystem)) {
+      if (!['custom', ...ALL_GRADING_SYSTEMS].includes(gradingSystem)) {
         throw new Error(`Invalid grading_system for subject ${subjectId}`);
       }
-      if (gradingSystem === 'normal' || gradingSystem === 'msce') {
+      if (gradingSystem !== 'custom') {
         remove.run(id, subjectId);
         continue;
       }
@@ -357,7 +382,7 @@ router.put('/:id', idValidation, (req, res, next) => {
       values.push(year);
     }
     if (grading_system !== undefined) {
-      if (!['normal', 'msce'].includes(grading_system)) {
+      if (!isSupportedGradingSystem(grading_system)) {
         return res.status(400).json({ error: 'Invalid grading system' });
       }
       updates.push('grading_system = ?');
@@ -708,7 +733,7 @@ router.get('/:id/rankings', idValidation, (req, res) => {
 router.get('/criteria/:system', (req, res) => {
   const { system } = req.params;
   
-  if (!['normal', 'msce'].includes(system)) {
+  if (!isSupportedGradingSystem(system)) {
     return res.status(400).json({ error: 'Invalid grading system' });
   }
 
@@ -722,7 +747,7 @@ router.put('/criteria/:system', authenticateToken, (req, res, next) => {
     const { system } = req.params;
     const { criteria } = req.body;
 
-    if (!['normal', 'msce'].includes(system)) {
+    if (!isSupportedGradingSystem(system)) {
       return res.status(400).json({ error: 'Invalid grading system' });
     }
 
