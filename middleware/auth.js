@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import db from '../db/database.js';
+import { assertTeacherAccessPolicy } from '../utils/accessPolicy.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production-2024';
 const JWT_EXPIRES_IN = '24h';
@@ -16,7 +17,7 @@ export function generateToken(user) {
   );
 }
 
-export function authenticateToken(req, res, next) {
+export async function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
 
@@ -36,9 +37,14 @@ export function authenticateToken(req, res, next) {
       return res.status(403).json({ error: 'Account is inactive. Please contact admin.' });
     }
 
+    await assertTeacherAccessPolicy(user);
+
     req.user = user;
     next();
   } catch (error) {
+    if (typeof error?.status === 'number') {
+      return res.status(error.status).json({ error: error.message || 'Access denied' });
+    }
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({ error: 'Token expired' });
     }

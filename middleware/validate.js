@@ -54,6 +54,13 @@ export const userValidation = {
   login: [
     body('username').trim().notEmpty().withMessage('Username is required'),
     body('password').notEmpty().withMessage('Password is required'),
+    body('school_id')
+      .optional({ nullable: true })
+      .trim()
+      .isLength({ min: 6, max: 64 }).withMessage('School ID must be 6-64 characters'),
+    body('deployment_mode')
+      .optional({ nullable: true })
+      .isIn(['admin_setup', 'teacher_setup', 'user_login']).withMessage('Invalid deployment mode'),
     handleValidation
   ]
 };
@@ -200,6 +207,12 @@ export const examValidation = {
     body('component_exam_id')
       .optional({ nullable: true })
       .isString().withMessage('Component exam ID must be a string'),
+    body('merge_exam_ids')
+      .optional()
+      .isArray().withMessage('merge_exam_ids must be an array'),
+    body('merge_exam_ids.*')
+      .optional()
+      .isString().withMessage('Each merge exam ID must be a string'),
     body('component_weight')
       .optional()
       .isFloat({ min: 0, max: 100 }).withMessage('Component weight must be between 0 and 100'),

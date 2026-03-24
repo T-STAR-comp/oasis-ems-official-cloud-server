@@ -16,6 +16,7 @@ import importRoutes from './routes/import.js';
 import schoolRoutes from './routes/school.js';
 import licenseRoutes from './routes/license.js';
 import systemRoutes from './routes/system.js';
+import analyticsRoutes from './routes/analytics.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -95,6 +96,7 @@ app.use('/api/import', importRoutes);
 app.use('/api/school', schoolRoutes);
 app.use('/api/license', licenseRoutes);
 app.use('/api/system', systemRoutes);
+app.use('/api/analytics', analyticsRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

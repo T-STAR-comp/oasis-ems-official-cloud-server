@@ -64,6 +64,30 @@ function ensureExamScoresEditable(exam, res) {
   return false;
 }
 
+function buildMergedResults(sourceRows, targetMaxScore) {
+  const totals = new Map();
+  sourceRows.forEach((row) => {
+    const maxScore = Math.max(1, Number(row.source_max_score || 100));
+    const normalizedScore = (Number(row.score) / maxScore) * targetMaxScore;
+    const key = `${row.student_id}::${row.subject_id}`;
+    const current = totals.get(key) || {
+      student_id: row.student_id,
+      subject_id: row.subject_id,
+      sum: 0,
+      count: 0,
+    };
+    current.sum += normalizedScore;
+    current.count += 1;
+    totals.set(key, current);
+  });
+
+  return Array.from(totals.values()).map((entry) => ({
+    student_id: entry.student_id,
+    subject_id: entry.subject_id,
+    score: Number((entry.sum / entry.count).toFixed(2)),
+  }));
+}
+
 // Get all exams (optionally filter by class)
 router.get('/', (req, res) => {
   const { class_id } = req.query;
@@ -84,6 +108,7 @@ router.get('/', (req, res) => {
         ) ASC, u.created_at ASC
         LIMIT 1
       ) as form_teacher_name,
+      (SELECT COUNT(*) FROM exam_merge_sources ems WHERE ems.exam_id = e.id) as merged_source_count,
       (SELECT COUNT(DISTINCT student_id) FROM exam_results WHERE exam_id = e.id) as students_graded
     FROM exams e
     JOIN classes c ON e.class_id = c.id
@@ -125,7 +150,8 @@ router.get('/:id', idValidation, (req, res) => {
                SELECT COUNT(*) FROM user_class_assignments x WHERE x.user_id = u.id
              ) ASC, u.created_at ASC
              LIMIT 1
-           ) as form_teacher_name
+           ) as form_teacher_name,
+           (SELECT COUNT(*) FROM exam_merge_sources ems WHERE ems.exam_id = e.id) as merged_source_count
     FROM exams e
     JOIN classes c ON e.class_id = c.id
     LEFT JOIN exams ce ON e.component_exam_id = ce.id
@@ -159,6 +185,14 @@ router.get('/:id', idValidation, (req, res) => {
     `).all(exam.component_exam_id);
   }
 
+  const mergeSources = db.prepare(`
+    SELECT ems.source_exam_id as id, e.name, e.type, e.term, e.year, e.max_score
+    FROM exam_merge_sources ems
+    JOIN exams e ON e.id = ems.source_exam_id
+    WHERE ems.exam_id = ?
+    ORDER BY e.created_at ASC
+  `).all(id);
+
   // Get students in this class
   const students = db.prepare(
     'SELECT * FROM students WHERE class_id = ? ORDER BY name ASC'
@@ -187,6 +221,7 @@ router.get('/:id', idValidation, (req, res) => {
       ...exam,
       results,
       componentResults,
+      mergeSources,
       students,
       subjects,
       rankings,
@@ -296,6 +331,7 @@ router.post('/', examValidation.create, (req, res, next) => {
       grading_system = 'normal',
       max_score = 100,
       component_exam_id = null,
+      merge_exam_ids = [],
       component_weight = 0,
       current_weight = 100
     } = req.body;
@@ -307,34 +343,108 @@ router.post('/', examValidation.create, (req, res, next) => {
     }
     if (!ensureClassAccess(req, res, class_id)) return;
 
-    const parsedComponentWeight = Number(component_weight);
-    const parsedCurrentWeight = Number(current_weight);
     const parsedMaxScore = Number(max_score);
     if (!Number.isFinite(parsedMaxScore) || parsedMaxScore <= 0) {
       return res.status(400).json({ error: 'Max score must be greater than 0' });
     }
-    if (Math.abs((parsedComponentWeight + parsedCurrentWeight) - 100) > 0.001) {
-      return res.status(400).json({ error: 'Component and current weights must add up to 100' });
-    }
 
+    const mergeExamIds = Array.from(
+      new Set((Array.isArray(merge_exam_ids) ? merge_exam_ids : []).map((id) => String(id || '').trim()).filter(Boolean))
+    );
+    const isMergeExam = mergeExamIds.length > 0;
+
+    let parsedComponentWeight = Number(component_weight);
+    let parsedCurrentWeight = Number(current_weight);
     let componentExamId = null;
-    if (component_exam_id) {
-      const componentExam = db.prepare('SELECT id, class_id FROM exams WHERE id = ?').get(component_exam_id);
-      if (!componentExam) {
-        return res.status(404).json({ error: 'Referenced component exam not found' });
+
+    if (isMergeExam) {
+      if (!['midterm', 'endterm'].includes(type)) {
+        return res.status(400).json({ error: 'Merged exams must be Mid Term or End of Term' });
       }
-      if (componentExam.class_id !== class_id) {
-        return res.status(400).json({ error: 'Referenced component exam must belong to the same class' });
+      if (mergeExamIds.length < 2) {
+        return res.status(400).json({ error: 'Select at least two completed tests to merge' });
       }
-      componentExamId = componentExam.id;
+      parsedComponentWeight = 0;
+      parsedCurrentWeight = 100;
+    } else {
+      if (Math.abs((parsedComponentWeight + parsedCurrentWeight) - 100) > 0.001) {
+        return res.status(400).json({ error: 'Component and current weights must add up to 100' });
+      }
+
+      if (component_exam_id) {
+        const componentExam = db.prepare('SELECT id, class_id FROM exams WHERE id = ?').get(component_exam_id);
+        if (!componentExam) {
+          return res.status(404).json({ error: 'Referenced component exam not found' });
+        }
+        if (componentExam.class_id !== class_id) {
+          return res.status(400).json({ error: 'Referenced component exam must belong to the same class' });
+        }
+        componentExamId = componentExam.id;
+      }
     }
 
     const id = uuidv4();
 
-    db.prepare(`
-      INSERT INTO exams (id, class_id, name, type, term, year, grading_system, max_score, component_exam_id, component_weight, current_weight)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, class_id, name, type, term, year, grading_system, parsedMaxScore, componentExamId, parsedComponentWeight, parsedCurrentWeight);
+    const saveExam = db.transaction(() => {
+      db.prepare(`
+        INSERT INTO exams (id, class_id, name, type, term, year, grading_system, max_score, component_exam_id, component_weight, current_weight)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, class_id, name, type, term, year, grading_system, parsedMaxScore, componentExamId, parsedComponentWeight, parsedCurrentWeight);
+
+      if (!isMergeExam) return;
+
+      const placeholders = mergeExamIds.map(() => '?').join(', ');
+      const sourceExams = db.prepare(`
+        SELECT id, class_id, type
+        FROM exams
+        WHERE id IN (${placeholders})
+      `).all(...mergeExamIds);
+      if (sourceExams.length !== mergeExamIds.length) {
+        throw new Error('One or more selected source tests could not be found');
+      }
+      if (sourceExams.some((examRow) => examRow.class_id !== class_id)) {
+        throw new Error('All selected tests must belong to the selected class');
+      }
+      if (sourceExams.some((examRow) => examRow.type !== 'test')) {
+        throw new Error('Only completed tests can be merged');
+      }
+
+      const insertMergeSource = db.prepare(`
+        INSERT INTO exam_merge_sources (exam_id, source_exam_id)
+        VALUES (?, ?)
+      `);
+      mergeExamIds.forEach((sourceExamId) => insertMergeSource.run(id, sourceExamId));
+
+      const sourceScoreRows = db.prepare(`
+        SELECT er.student_id, er.subject_id, er.score, e.max_score as source_max_score
+        FROM exam_results er
+        JOIN exams e ON e.id = er.exam_id
+        WHERE er.exam_id IN (${placeholders})
+      `).all(...mergeExamIds);
+
+      if (sourceScoreRows.length === 0) {
+        throw new Error('Selected tests have no recorded results to merge');
+      }
+
+      const mergedResults = buildMergedResults(sourceScoreRows, parsedMaxScore);
+      const upsertResult = db.prepare(`
+        INSERT INTO exam_results (exam_id, student_id, subject_id, score, grade, points)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(exam_id, student_id, subject_id)
+        DO UPDATE SET score = excluded.score, grade = excluded.grade, points = excluded.points, updated_at = CURRENT_TIMESTAMP
+      `);
+
+      mergedResults.forEach((resultRow) => {
+        const graded = getGrade(resultRow.score, grading_system);
+        upsertResult.run(id, resultRow.student_id, resultRow.subject_id, resultRow.score, graded.grade, graded.points);
+      });
+    });
+
+    try {
+      saveExam();
+    } catch (transactionError) {
+      return res.status(400).json({ error: transactionError.message || 'Failed to create merged exam' });
+    }
 
     const exam = db.prepare('SELECT * FROM exams WHERE id = ?').get(id);
 

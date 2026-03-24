@@ -16,6 +16,7 @@ const TABLES = [
   'grade_criteria',
   'user_class_assignments',
   'exam_subject_grading_profiles',
+  'exam_merge_sources',
   'app_identity',
 ];
 

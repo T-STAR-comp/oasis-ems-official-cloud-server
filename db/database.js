@@ -131,8 +131,15 @@ function ensureSchoolIdentity() {
     const newId = generateSchoolId();
     const country = DEFAULT_COUNTRY;
     db.prepare(`
-      INSERT INTO school_info (id, name, address, phone, email, logo, motto, opening_date, school_fees, headteacher_name, headteacher_signature, country, school_id)
-      VALUES (1, 'My School', '', '', '', NULL, '', '', '', '', '', ?, ?)
+      INSERT INTO school_info (
+        id, name, address, phone, email, logo, motto, opening_date, school_fees,
+        headteacher_name, headteacher_signature,
+        academic_year_start_date, academic_year_end_date,
+        semester1_start_date, semester1_end_date,
+        semester2_start_date, semester2_end_date,
+        country, school_id
+      )
+      VALUES (1, 'My School', '', '', '', NULL, '', '', '', '', '', '', '', '', '', '', '', ?, ?)
     `).run(country, newId);
     return { schoolId: newId, country };
   }
@@ -460,8 +467,17 @@ export function initializeDatabase() {
       school_fees TEXT,
       headteacher_name TEXT,
       headteacher_signature TEXT,
+      academic_year_start_date TEXT,
+      academic_year_end_date TEXT,
+      semester1_start_date TEXT,
+      semester1_end_date TEXT,
+      semester2_start_date TEXT,
+      semester2_end_date TEXT,
       country TEXT NOT NULL DEFAULT '${DEFAULT_COUNTRY}',
       school_id TEXT,
+      oae_enabled INTEGER NOT NULL DEFAULT 0,
+      oae_activated_at DATETIME,
+      oae_activated_by TEXT,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -469,8 +485,17 @@ export function initializeDatabase() {
   ensureColumn('school_info', 'school_fees', 'school_fees TEXT');
   ensureColumn('school_info', 'headteacher_name', 'headteacher_name TEXT');
   ensureColumn('school_info', 'headteacher_signature', 'headteacher_signature TEXT');
+  ensureColumn('school_info', 'academic_year_start_date', 'academic_year_start_date TEXT');
+  ensureColumn('school_info', 'academic_year_end_date', 'academic_year_end_date TEXT');
+  ensureColumn('school_info', 'semester1_start_date', 'semester1_start_date TEXT');
+  ensureColumn('school_info', 'semester1_end_date', 'semester1_end_date TEXT');
+  ensureColumn('school_info', 'semester2_start_date', 'semester2_start_date TEXT');
+  ensureColumn('school_info', 'semester2_end_date', 'semester2_end_date TEXT');
   ensureColumn('school_info', 'country', `country TEXT NOT NULL DEFAULT '${DEFAULT_COUNTRY}'`);
   ensureColumn('school_info', 'school_id', 'school_id TEXT');
+  ensureColumn('school_info', 'oae_enabled', 'oae_enabled INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('school_info', 'oae_activated_at', 'oae_activated_at DATETIME');
+  ensureColumn('school_info', 'oae_activated_by', 'oae_activated_by TEXT');
 
   migrateGradingTables();
 
@@ -479,8 +504,15 @@ export function initializeDatabase() {
   if (!schoolExists) {
     const generatedId = generateSchoolId();
     db.prepare(`
-      INSERT INTO school_info (id, name, address, phone, email, logo, motto, opening_date, school_fees, headteacher_name, headteacher_signature, country, school_id)
-      VALUES (1, 'My School', '', '', '', NULL, '', '', '', '', '', ?, ?)
+      INSERT INTO school_info (
+        id, name, address, phone, email, logo, motto, opening_date, school_fees,
+        headteacher_name, headteacher_signature,
+        academic_year_start_date, academic_year_end_date,
+        semester1_start_date, semester1_end_date,
+        semester2_start_date, semester2_end_date,
+        country, school_id
+      )
+      VALUES (1, 'My School', '', '', '', NULL, '', '', '', '', '', '', '', '', '', '', '', ?, ?)
     `).run(DEFAULT_COUNTRY, generatedId);
   }
   const { country } = ensureSchoolIdentity();
@@ -625,6 +657,17 @@ export function initializeDatabase() {
     )
   `);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS exam_merge_sources (
+      exam_id TEXT NOT NULL,
+      source_exam_id TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (exam_id, source_exam_id),
+      FOREIGN KEY (exam_id) REFERENCES exams(id) ON DELETE CASCADE,
+      FOREIGN KEY (source_exam_id) REFERENCES exams(id) ON DELETE CASCADE
+    )
+  `);
+
   seedGradeCriteriaForCountry(country);
 
   // Create indexes for better performance
@@ -640,6 +683,7 @@ export function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_results_exam ON exam_results(exam_id);
     CREATE INDEX IF NOT EXISTS idx_results_student ON exam_results(student_id);
     CREATE INDEX IF NOT EXISTS idx_exam_subject_profiles_exam ON exam_subject_grading_profiles(exam_id);
+    CREATE INDEX IF NOT EXISTS idx_exam_merge_sources_exam ON exam_merge_sources(exam_id);
   `);
 
   // Backfill enrollments for existing data: every student gets all compulsory subjects.
@@ -685,6 +729,7 @@ export function resetEducationData(nextCountry) {
   const wipeTables = [
     'exam_results',
     'exam_subject_grading_profiles',
+    'exam_merge_sources',
     'exams',
     'student_subjects',
     'subjects',
@@ -714,8 +759,17 @@ export function resetEducationData(nextCountry) {
           school_fees = '',
           headteacher_name = '',
           headteacher_signature = '',
+          academic_year_start_date = '',
+          academic_year_end_date = '',
+          semester1_start_date = '',
+          semester1_end_date = '',
+          semester2_start_date = '',
+          semester2_end_date = '',
           country = ?,
           school_id = ?,
+          oae_enabled = 0,
+          oae_activated_at = NULL,
+          oae_activated_by = NULL,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = 1
     `).run(country, schoolId);

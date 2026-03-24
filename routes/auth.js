@@ -5,13 +5,23 @@ import crypto from 'crypto';
 import db from '../db/database.js';
 import { generateToken, authenticateToken, requireRole } from '../middleware/auth.js';
 import { userValidation } from '../middleware/validate.js';
+import { assertSchoolIdMatchesCurrent, assertTeacherAccessPolicy, getConfiguredSchoolId, normalizeSchoolId } from '../utils/accessPolicy.js';
 
 const router = express.Router();
+
+function normalizeDeploymentMode(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'admin_setup') return 'admin_setup';
+  if (normalized === 'teacher_setup' || normalized === 'user_login') return 'teacher_setup';
+  return null;
+}
 
 // Login
 router.post('/login', userValidation.login, async (req, res, next) => {
   try {
     const { username, password } = req.body;
+    const deploymentMode = normalizeDeploymentMode(req.body?.deployment_mode);
+    const requestedSchoolId = normalizeSchoolId(req.body?.school_id);
 
     // Find user by username or email
     const user = db.prepare(
@@ -31,7 +41,14 @@ router.post('/login', userValidation.login, async (req, res, next) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    if (deploymentMode === 'teacher_setup') {
+      assertSchoolIdMatchesCurrent(requestedSchoolId);
+    }
+
+    await assertTeacherAccessPolicy(user);
+
     const token = generateToken(user);
+    const configuredSchoolId = getConfiguredSchoolId();
 
     res.json({
       message: 'Login successful',
@@ -41,6 +58,7 @@ router.post('/login', userValidation.login, async (req, res, next) => {
         email: user.email,
         role: user.role,
         full_name: user.full_name,
+        school_id: configuredSchoolId || null,
         is_active: Number(user.is_active || 1) === 1,
         force_password_change: Number(user.force_password_change || 0) === 1
       },

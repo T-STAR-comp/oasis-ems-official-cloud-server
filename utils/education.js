@@ -245,35 +245,8 @@ export function getDefaultClassesForCountry(country, year) {
   const academicYear = String(year || new Date().getFullYear());
 
   if (normalized === 'Nigeria') {
-    const templates = [];
-    for (let i = 1; i <= 6; i += 1) {
-      templates.push({
-        name: `Primary ${i}`,
-        year: academicYear,
-        min_subjects: 8,
-        max_subjects: 12,
-        subjects: NIGERIA_PRIMARY_SUBJECTS,
-      });
-    }
-    for (let i = 1; i <= 3; i += 1) {
-      templates.push({
-        name: `JSS ${i}`,
-        year: academicYear,
-        min_subjects: 8,
-        max_subjects: 12,
-        subjects: NIGERIA_JSS_SUBJECTS,
-      });
-    }
-    for (let i = 1; i <= 3; i += 1) {
-      templates.push({
-        name: `SSS ${i}`,
-        year: academicYear,
-        min_subjects: 7,
-        max_subjects: 10,
-        subjects: NIGERIA_SSS_SUBJECTS,
-      });
-    }
-    return templates;
+    // Nigerian schools create classes manually per school policy.
+    return [];
   }
 
   return ['Form 1', 'Form 2', 'Form 3', 'Form 4'].map((name) => ({

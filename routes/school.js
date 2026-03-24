@@ -76,7 +76,23 @@ router.get('/education', (req, res) => {
 // Update school info
 router.put('/info', authenticateToken, requireRole('admin', 'secretary'), (req, res, next) => {
   try {
-    const { name, address, phone, email, motto, opening_date, school_fees, headteacher_name, headteacher_signature } = req.body;
+    const {
+      name,
+      address,
+      phone,
+      email,
+      motto,
+      opening_date,
+      school_fees,
+      headteacher_name,
+      headteacher_signature,
+      academic_year_start_date,
+      academic_year_end_date,
+      semester1_start_date,
+      semester1_end_date,
+      semester2_start_date,
+      semester2_end_date,
+    } = req.body;
 
     const updates = [];
     const values = [];
@@ -119,6 +135,30 @@ router.put('/info', authenticateToken, requireRole('admin', 'secretary'), (req, 
     if (headteacher_signature !== undefined) {
       updates.push('headteacher_signature = ?');
       values.push(headteacher_signature);
+    }
+    if (academic_year_start_date !== undefined) {
+      updates.push('academic_year_start_date = ?');
+      values.push(academic_year_start_date);
+    }
+    if (academic_year_end_date !== undefined) {
+      updates.push('academic_year_end_date = ?');
+      values.push(academic_year_end_date);
+    }
+    if (semester1_start_date !== undefined) {
+      updates.push('semester1_start_date = ?');
+      values.push(semester1_start_date);
+    }
+    if (semester1_end_date !== undefined) {
+      updates.push('semester1_end_date = ?');
+      values.push(semester1_end_date);
+    }
+    if (semester2_start_date !== undefined) {
+      updates.push('semester2_start_date = ?');
+      values.push(semester2_start_date);
+    }
+    if (semester2_end_date !== undefined) {
+      updates.push('semester2_end_date = ?');
+      values.push(semester2_end_date);
     }
 
     if (updates.length > 0) {
