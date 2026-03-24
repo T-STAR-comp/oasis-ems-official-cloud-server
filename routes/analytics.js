@@ -7,7 +7,7 @@ import {
   readOaeState,
   runAnalyticsSimulation,
   updateOaeState,
-} from '../../shared/analytics/oae.js';
+} from '../utils/oae.js';
 
 const router = express.Router();
 
