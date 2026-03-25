@@ -1,9 +1,11 @@
 import Database from 'better-sqlite3';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import {
   DEFAULT_COUNTRY,
   normalizeCountry,
@@ -28,34 +30,196 @@ function copyIfExists(sourcePath, destinationPath) {
   }
 }
 
-function resolveDatabasePath() {
-  const legacyDbPath = path.join(__dirname, 'school.db');
+function normalizeSchoolId(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function createTenantError(message, statusCode = 400) {
+  const error = new Error(message);
+  error.status = statusCode;
+  error.statusCode = statusCode;
+  return error;
+}
+
+function resolveDataRoot() {
   const preferredDir = process.env.OASIS_DATA_DIR
     ? path.resolve(process.env.OASIS_DATA_DIR)
     : __dirname;
   ensureDirectory(preferredDir);
-  const preferredDbPath = path.join(preferredDir, 'school.db');
-
-  // First run on desktop: migrate existing DB from server/db into writable app data dir.
-  if (preferredDbPath !== legacyDbPath && !fs.existsSync(preferredDbPath)) {
-    copyIfExists(legacyDbPath, preferredDbPath);
-    copyIfExists(`${legacyDbPath}-wal`, `${preferredDbPath}-wal`);
-    copyIfExists(`${legacyDbPath}-shm`, `${preferredDbPath}-shm`);
-  }
-
-  return preferredDbPath;
+  ensureDirectory(path.join(preferredDir, 'schools'));
+  return preferredDir;
 }
 
-const dbPath = resolveDatabasePath();
-const db = new Database(dbPath);
+function resolveLegacyDatabasePath() {
+  return path.join(__dirname, 'school.db');
+}
+
+function sanitizeSchoolIdForPath(schoolId) {
+  const normalized = normalizeSchoolId(schoolId);
+  return normalized.replace(/[^A-Z0-9-]/g, '_');
+}
+
+function resolveTenantDatabasePath(schoolId) {
+  const tenantDir = path.join(resolveDataRoot(), 'schools', sanitizeSchoolIdForPath(schoolId));
+  ensureDirectory(tenantDir);
+  return path.join(tenantDir, 'school.db');
+}
+
+const tenantContext = new AsyncLocalStorage();
+const tenantConnections = new Map();
+const initializedTenants = new Set();
+const initializingTenants = new Set();
+
+function getContextStore() {
+  return tenantContext.getStore() || null;
+}
+
+function getContextSchoolId() {
+  return normalizeSchoolId(getContextStore()?.schoolId);
+}
+
+function readSchoolIdFromToken(req) {
+  const authHeader = String(req?.headers?.authorization || '');
+  if (!authHeader.startsWith('Bearer ')) return '';
+  try {
+    const decoded = jwt.decode(authHeader.slice('Bearer '.length));
+    return normalizeSchoolId(decoded?.school_id);
+  } catch (_error) {
+    return '';
+  }
+}
+
+function inferSchoolIdFromImportPayload(payload) {
+  const row = Array.isArray(payload?.school_info) ? payload.school_info[0] : null;
+  return normalizeSchoolId(row?.school_id);
+}
+
+function resolveRequestSchoolId(req) {
+  return (
+    readSchoolIdFromToken(req) ||
+    normalizeSchoolId(req?.body?.school_id) ||
+    inferSchoolIdFromImportPayload(req?.body?.data) ||
+    normalizeSchoolId(req?.query?.school_id)
+  );
+}
+
+function createConnection(dbPath) {
+  const connection = new Database(dbPath);
+  connection.pragma('journal_mode = WAL');
+  connection.pragma('foreign_keys = ON');
+  return connection;
+}
+
+function migrateLegacyDatabaseIfNeeded(schoolId, tenantDbPath) {
+  const legacyDbPath = resolveLegacyDatabasePath();
+  if (!fs.existsSync(legacyDbPath) || fs.existsSync(tenantDbPath)) {
+    return;
+  }
+
+  try {
+    const legacyDb = new Database(legacyDbPath, { readonly: true, fileMustExist: true });
+    const row = legacyDb.prepare('SELECT school_id FROM school_info WHERE id = 1').get();
+    legacyDb.close();
+    if (normalizeSchoolId(row?.school_id) !== normalizeSchoolId(schoolId)) {
+      return;
+    }
+    copyIfExists(legacyDbPath, tenantDbPath);
+    copyIfExists(`${legacyDbPath}-wal`, `${tenantDbPath}-wal`);
+    copyIfExists(`${legacyDbPath}-shm`, `${tenantDbPath}-shm`);
+  } catch (_error) {
+    // Ignore legacy migration failures and fall back to normal tenant provisioning.
+  }
+}
+
+function ensureTenantInitialized(schoolId) {
+  const normalizedSchoolId = normalizeSchoolId(schoolId);
+  if (!normalizedSchoolId || initializedTenants.has(normalizedSchoolId) || initializingTenants.has(normalizedSchoolId)) {
+    return;
+  }
+
+  initializingTenants.add(normalizedSchoolId);
+  try {
+    runWithSchoolContext(normalizedSchoolId, () => {
+      bootstrapCurrentDatabase();
+    }, { allowCreate: true });
+    initializedTenants.add(normalizedSchoolId);
+  } finally {
+    initializingTenants.delete(normalizedSchoolId);
+  }
+}
+
+function getTenantConnection(schoolId, { allowCreate = false } = {}) {
+  const normalizedSchoolId = normalizeSchoolId(schoolId);
+  if (!normalizedSchoolId) {
+    throw createTenantError('School ID is required for cloud access.', 400);
+  }
+
+  const dbPath = resolveTenantDatabasePath(normalizedSchoolId);
+  if (!fs.existsSync(dbPath)) {
+    migrateLegacyDatabaseIfNeeded(normalizedSchoolId, dbPath);
+  }
+  if (!fs.existsSync(dbPath) && !allowCreate) {
+    throw createTenantError('School was not found in cloud storage. Verify the School ID or migrate the school first.', 404);
+  }
+
+  let connection = tenantConnections.get(normalizedSchoolId);
+  if (!connection) {
+    connection = createConnection(dbPath);
+    tenantConnections.set(normalizedSchoolId, connection);
+  }
+
+  ensureTenantInitialized(normalizedSchoolId);
+  return connection;
+}
+
+function getActiveConnection() {
+  const store = getContextStore();
+  const normalizedSchoolId = normalizeSchoolId(store?.schoolId);
+  if (!normalizedSchoolId) {
+    throw createTenantError('School context is required for this cloud request.', 400);
+  }
+
+  return getTenantConnection(normalizedSchoolId, {
+    allowCreate: store?.allowCreate === true,
+  });
+}
+
+const db = new Proxy({}, {
+  get(_target, property) {
+    const connection = getActiveConnection();
+    const value = connection[property];
+    return typeof value === 'function' ? value.bind(connection) : value;
+  },
+});
+
+export function runWithSchoolContext(schoolId, fn, { allowCreate = false } = {}) {
+  const normalizedSchoolId = normalizeSchoolId(schoolId);
+  if (!normalizedSchoolId) {
+    throw createTenantError('School ID is required for this cloud request.', 400);
+  }
+
+  return tenantContext.run({
+    schoolId: normalizedSchoolId,
+    allowCreate: allowCreate === true,
+  }, fn);
+}
+
+export function bindSchoolContext(req, _res, next) {
+  const schoolId = resolveRequestSchoolId(req);
+  if (!schoolId) {
+    return next();
+  }
+
+  return runWithSchoolContext(schoolId, () => next(), { allowCreate: false });
+}
+
+export function resolveSchoolIdFromImportPayload(payload) {
+  return inferSchoolIdFromImportPayload(payload);
+}
 const UID_SECRET = process.env.OASIS_UID_SECRET || '';
 if (!UID_SECRET.trim()) {
   throw new Error('Missing OASIS_UID_SECRET environment variable.');
 }
-
-// Enable foreign keys and WAL mode for better performance
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
 
 function uidSecretKey() {
   return crypto.createHash('sha256').update(UID_SECRET).digest();
@@ -426,7 +590,7 @@ function seedDefaultClasses(country) {
   tx();
 }
 
-export function initializeDatabase() {
+function bootstrapCurrentDatabase() {
   const ensureColumn = (table, column, definition) => {
     const columns = db.prepare(`PRAGMA table_info(${table})`).all();
     const exists = columns.some((c) => c.name === column);
@@ -717,8 +881,25 @@ export function initializeDatabase() {
   console.log('✅ Database initialized successfully');
 }
 
-export function getInternalUid() {
-  return ensureInternalUid();
+export function initializeDatabase(targetSchoolId = null) {
+  resolveDataRoot();
+  const normalizedSchoolId = normalizeSchoolId(targetSchoolId || getContextSchoolId());
+  if (!normalizedSchoolId) {
+    return null;
+  }
+
+  return runWithSchoolContext(normalizedSchoolId, () => (
+    getTenantConnection(normalizedSchoolId, { allowCreate: true })
+  ), { allowCreate: true });
+}
+
+export function getInternalUid(targetSchoolId = null) {
+  const normalizedSchoolId = normalizeSchoolId(targetSchoolId || getContextSchoolId());
+  if (!normalizedSchoolId) {
+    throw createTenantError('School ID is required to resolve internal UID.', 400);
+  }
+
+  return runWithSchoolContext(normalizedSchoolId, () => ensureInternalUid(), { allowCreate: true });
 }
 
 export function resetEducationData(nextCountry) {

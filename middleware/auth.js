@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
 import db from '../db/database.js';
-import { assertTeacherAccessPolicy } from '../utils/accessPolicy.js';
+import { assertTeacherAccessPolicy, normalizeSchoolId } from '../utils/accessPolicy.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production-2024';
 const JWT_EXPIRES_IN = '24h';
@@ -10,7 +10,8 @@ export function generateToken(user) {
     { 
       id: user.id, 
       username: user.username, 
-      role: user.role 
+      role: user.role,
+      school_id: normalizeSchoolId(user.school_id),
     },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN }
@@ -27,6 +28,10 @@ export async function authenticateToken(req, res, next) {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
+    const schoolId = normalizeSchoolId(decoded?.school_id);
+    if (!schoolId) {
+      return res.status(401).json({ error: 'Session is missing school context. Please login again.' });
+    }
     
     // Verify user still exists in database
     const user = db.prepare('SELECT id, username, role, email, full_name, is_active, force_password_change FROM users WHERE id = ?').get(decoded.id);
@@ -39,7 +44,10 @@ export async function authenticateToken(req, res, next) {
 
     await assertTeacherAccessPolicy(user);
 
-    req.user = user;
+    req.user = {
+      ...user,
+      school_id: schoolId,
+    };
     next();
   } catch (error) {
     if (typeof error?.status === 'number') {

@@ -1,5 +1,5 @@
 import express from 'express';
-import db from '../db/database.js';
+import db, { initializeDatabase, resolveSchoolIdFromImportPayload, runWithSchoolContext } from '../db/database.js';
 import { authenticateToken, isAdminUser } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -107,16 +107,25 @@ router.post('/import-bootstrap', (req, res) => {
     return res.status(400).json({ error: 'Invalid migration payload' });
   }
 
-  if (!isFreshBootstrapState()) {
-    return authenticateToken(req, res, () => {
-      if (!ensureAdmin(req, res)) return;
-      applyImportPayload(data);
-      return res.json({ message: 'Migration import completed' });
-    });
+  const schoolId = resolveSchoolIdFromImportPayload(data);
+  if (!schoolId) {
+    return res.status(400).json({ error: 'School ID is missing from the migration payload.' });
   }
 
-  applyImportPayload(data);
-  return res.json({ message: 'Bootstrap import completed' });
+  return runWithSchoolContext(schoolId, () => {
+    initializeDatabase(schoolId);
+
+    if (!isFreshBootstrapState()) {
+      return authenticateToken(req, res, () => {
+        if (!ensureAdmin(req, res)) return;
+        applyImportPayload(data);
+        return res.json({ message: 'Migration import completed', school_id: schoolId });
+      });
+    }
+
+    applyImportPayload(data);
+    return res.json({ message: 'Bootstrap import completed', school_id: schoolId });
+  }, { allowCreate: true });
 });
 
 export default router;

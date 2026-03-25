@@ -78,7 +78,7 @@ async function fetchSchoolActivationStatus(schoolId) {
 export function assertSchoolIdMatchesCurrent(requestedSchoolId) {
   const normalizedRequested = normalizeSchoolId(requestedSchoolId);
   if (!normalizedRequested) {
-    throw createPolicyError('School ID is required for teacher setup.', 400);
+    throw createPolicyError('School ID is required for online login.', 400);
   }
 
   const configuredSchoolId = getConfiguredSchoolId();

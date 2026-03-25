@@ -12,6 +12,13 @@ const __dirname = path.dirname(__filename);
 
 const router = express.Router();
 
+function hasSchoolLookupContext(req) {
+  return Boolean(
+    String(req?.query?.school_id || '').trim() ||
+    String(req?.headers?.authorization || '').trim()
+  );
+}
+
 // Configure multer for logo uploads
 const uploadsRoot = process.env.OASIS_UPLOADS_DIR
   ? path.resolve(process.env.OASIS_UPLOADS_DIR)
@@ -60,11 +67,17 @@ const uploadLogo = multer({
 
 // Get school info (public - for reports)
 router.get('/info', (req, res) => {
+  if (!hasSchoolLookupContext(req)) {
+    return res.status(400).json({ error: 'School ID is required for cloud school lookup.' });
+  }
   const schoolInfo = db.prepare('SELECT * FROM school_info WHERE id = 1').get();
   res.json({ school: schoolInfo });
 });
 
 router.get('/education', (req, res) => {
+  if (!hasSchoolLookupContext(req)) {
+    return res.status(400).json({ error: 'School ID is required for cloud school lookup.' });
+  }
   const schoolInfo = db.prepare('SELECT school_id, country FROM school_info WHERE id = 1').get();
   res.json({
     school_id: schoolInfo?.school_id || null,

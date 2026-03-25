@@ -22,6 +22,11 @@ router.post('/login', userValidation.login, async (req, res, next) => {
     const { username, password } = req.body;
     const deploymentMode = normalizeDeploymentMode(req.body?.deployment_mode);
     const requestedSchoolId = normalizeSchoolId(req.body?.school_id);
+    if (!requestedSchoolId) {
+      return res.status(400).json({ error: 'School ID is required for online login.' });
+    }
+
+    assertSchoolIdMatchesCurrent(requestedSchoolId);
 
     // Find user by username or email
     const user = db.prepare(
@@ -41,13 +46,12 @@ router.post('/login', userValidation.login, async (req, res, next) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    if (deploymentMode === 'teacher_setup') {
-      assertSchoolIdMatchesCurrent(requestedSchoolId);
-    }
-
     await assertTeacherAccessPolicy(user);
 
-    const token = generateToken(user);
+    const token = generateToken({
+      ...user,
+      school_id: requestedSchoolId,
+    });
     const configuredSchoolId = getConfiguredSchoolId();
 
     res.json({
@@ -82,6 +86,7 @@ router.get('/me', authenticateToken, (req, res) => {
   res.json({
     user: {
       ...user,
+      school_id: req.user.school_id || getConfiguredSchoolId() || null,
       is_active: Number(user.is_active || 1) === 1,
       force_password_change: Number(user.force_password_change || 0) === 1
     }
@@ -134,6 +139,7 @@ router.put('/me', authenticateToken, (req, res, next) => {
         email: user.email,
         role: user.role,
         full_name: user.full_name,
+        school_id: req.user.school_id || getConfiguredSchoolId() || null,
         is_active: Number(user.is_active || 1) === 1,
         force_password_change: Number(user.force_password_change || 0) === 1
       }

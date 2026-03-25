@@ -5,7 +5,7 @@ import rateLimit from 'express-rate-limit';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { initializeDatabase } from './db/database.js';
+import { bindSchoolContext, initializeDatabase } from './db/database.js';
 import authRoutes from './routes/auth.js';
 import classRoutes from './routes/classes.js';
 import studentRoutes from './routes/students.js';
@@ -78,6 +78,7 @@ const authLimiter = rateLimit({
 // Body parsing
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(bindSchoolContext);
 
 // Serve uploaded files
 app.use('/uploads', express.static(uploadsDir));
