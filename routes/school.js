@@ -5,7 +5,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import db, { resetEducationData } from '../db/database.js';
 import { authenticateToken, getAssignedClassIds, isAdminUser, requireRole } from '../middleware/auth.js';
-import { isSupportedGradingSystem, normalizeCountry, SUPPORTED_COUNTRIES } from '../utils/education.js';
+import { getGradingSystemsForCountry, isSupportedGradingSystem, normalizeCountry, SUPPORTED_COUNTRIES } from '../utils/education.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,6 +17,32 @@ function hasSchoolLookupContext(req) {
     String(req?.query?.school_id || '').trim() ||
     String(req?.headers?.authorization || '').trim()
   );
+}
+
+function getSchoolCountry() {
+  const row = db.prepare('SELECT country FROM school_info WHERE id = 1').get();
+  return normalizeCountry(row?.country);
+}
+
+function getUnavailableGradingMessage(system) {
+  const country = getSchoolCountry();
+  if (system === 'msce' && country === 'Nigeria') {
+    return 'MSCE grading is not available for Nigerian schools.';
+  }
+  return `${system} grading is not available for ${country}.`;
+}
+
+function ensureAllowedGradingSystem(system, res) {
+  const normalized = String(system || '').trim();
+  if (!isSupportedGradingSystem(normalized)) {
+    res.status(400).json({ error: 'Invalid grading system' });
+    return false;
+  }
+  if (!getGradingSystemsForCountry(getSchoolCountry()).includes(normalized)) {
+    res.status(400).json({ error: getUnavailableGradingMessage(normalized) });
+    return false;
+  }
+  return true;
 }
 
 // Configure multer for logo uploads
@@ -303,9 +329,7 @@ router.get('/stats', authenticateToken, (req, res) => {
 router.get('/grading', authenticateToken, (req, res) => {
   const system = String(req.query.system || 'normal');
 
-  if (!isSupportedGradingSystem(system)) {
-    return res.status(400).json({ error: 'Invalid grading system' });
-  }
+  if (!ensureAllowedGradingSystem(system, res)) return;
 
   const criteria = db.prepare(`
     SELECT grade, min_score, max_score, points, remark
@@ -322,9 +346,7 @@ router.put('/grading', authenticateToken, requireRole('admin', 'secretary'), (re
   try {
     const { criteria, system = 'normal' } = req.body;
 
-    if (!isSupportedGradingSystem(system)) {
-      return res.status(400).json({ error: 'Invalid grading system' });
-    }
+    if (!ensureAllowedGradingSystem(system, res)) return;
 
     if (!Array.isArray(criteria) || criteria.length === 0) {
       return res.status(400).json({ error: 'Criteria array required' });

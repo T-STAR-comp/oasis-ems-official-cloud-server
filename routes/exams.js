@@ -4,7 +4,7 @@ import db from '../db/database.js';
 import { authenticateToken, ensureClassAccess, getAssignedClassIds, isAdminUser } from '../middleware/auth.js';
 import { examValidation, idValidation } from '../middleware/validate.js';
 import { getGrade, rankStudentsByExam, getGradeCriteria } from '../utils/grading.js';
-import { ALL_GRADING_SYSTEMS, isSupportedGradingSystem } from '../utils/education.js';
+import { ALL_GRADING_SYSTEMS, getGradingSystemsForCountry, isSupportedGradingSystem, normalizeCountry } from '../utils/education.js';
 
 const router = express.Router();
 
@@ -86,6 +86,36 @@ function buildMergedResults(sourceRows, targetMaxScore) {
     subject_id: entry.subject_id,
     score: Number((entry.sum / entry.count).toFixed(2)),
   }));
+}
+
+function getSchoolCountry() {
+  const row = db.prepare('SELECT country FROM school_info WHERE id = 1').get();
+  return normalizeCountry(row?.country);
+}
+
+function getAllowedGradingSystems() {
+  return getGradingSystemsForCountry(getSchoolCountry());
+}
+
+function getUnavailableGradingMessage(system) {
+  const country = getSchoolCountry();
+  if (system === 'msce' && country === 'Nigeria') {
+    return 'MSCE grading is not available for Nigerian schools.';
+  }
+  return `${system} grading is not available for ${country}.`;
+}
+
+function ensureAllowedGradingSystem(system, res) {
+  const normalized = String(system || '').trim();
+  if (!isSupportedGradingSystem(normalized)) {
+    res.status(400).json({ error: 'Invalid grading system' });
+    return false;
+  }
+  if (!getAllowedGradingSystems().includes(normalized)) {
+    res.status(400).json({ error: getUnavailableGradingMessage(normalized) });
+    return false;
+  }
+  return true;
 }
 
 // Get all exams (optionally filter by class)
@@ -278,6 +308,7 @@ router.put('/:id/subject-grading', idValidation, (req, res) => {
   const remove = db.prepare('DELETE FROM exam_subject_grading_profiles WHERE exam_id = ? AND subject_id = ?');
 
   const tx = db.transaction((items) => {
+    const allowedGradingSystems = getAllowedGradingSystems();
     for (const item of items) {
       const subjectId = String(item?.subject_id || '').trim();
       const gradingSystem = String(item?.grading_system || '').trim();
@@ -286,6 +317,9 @@ router.put('/:id/subject-grading', idValidation, (req, res) => {
       }
       if (!['custom', ...ALL_GRADING_SYSTEMS].includes(gradingSystem)) {
         throw new Error(`Invalid grading_system for subject ${subjectId}`);
+      }
+      if (gradingSystem !== 'custom' && !allowedGradingSystems.includes(gradingSystem)) {
+        throw new Error(getUnavailableGradingMessage(gradingSystem));
       }
       if (gradingSystem !== 'custom') {
         remove.run(id, subjectId);
@@ -335,6 +369,8 @@ router.post('/', examValidation.create, (req, res, next) => {
       component_weight = 0,
       current_weight = 100
     } = req.body;
+
+    if (!ensureAllowedGradingSystem(grading_system, res)) return;
 
     // Verify class exists
     const classExists = db.prepare('SELECT id FROM classes WHERE id = ?').get(class_id);
@@ -492,9 +528,7 @@ router.put('/:id', idValidation, (req, res, next) => {
       values.push(year);
     }
     if (grading_system !== undefined) {
-      if (!isSupportedGradingSystem(grading_system)) {
-        return res.status(400).json({ error: 'Invalid grading system' });
-      }
+      if (!ensureAllowedGradingSystem(grading_system, res)) return;
       updates.push('grading_system = ?');
       values.push(grading_system);
     }
@@ -843,9 +877,7 @@ router.get('/:id/rankings', idValidation, (req, res) => {
 router.get('/criteria/:system', (req, res) => {
   const { system } = req.params;
   
-  if (!isSupportedGradingSystem(system)) {
-    return res.status(400).json({ error: 'Invalid grading system' });
-  }
+  if (!ensureAllowedGradingSystem(system, res)) return;
 
   const criteria = getGradeCriteria(system);
   res.json({ criteria });
@@ -857,9 +889,7 @@ router.put('/criteria/:system', authenticateToken, (req, res, next) => {
     const { system } = req.params;
     const { criteria } = req.body;
 
-    if (!isSupportedGradingSystem(system)) {
-      return res.status(400).json({ error: 'Invalid grading system' });
-    }
+    if (!ensureAllowedGradingSystem(system, res)) return;
 
     if (!Array.isArray(criteria)) {
       return res.status(400).json({ error: 'Criteria array required' });

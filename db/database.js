@@ -661,6 +661,33 @@ function bootstrapCurrentDatabase() {
   ensureColumn('school_info', 'oae_activated_at', 'oae_activated_at DATETIME');
   ensureColumn('school_info', 'oae_activated_by', 'oae_activated_by TEXT');
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS subscription_records (
+      id TEXT PRIMARY KEY,
+      school_id TEXT,
+      country TEXT NOT NULL DEFAULT '${DEFAULT_COUNTRY}',
+      admin_email TEXT,
+      admin_name TEXT,
+      plan_kind TEXT NOT NULL CHECK(plan_kind IN ('trial', 'manual_offline', 'digital_online')),
+      status TEXT NOT NULL CHECK(status IN ('pending', 'pending_activation', 'active', 'expired', 'failed')),
+      activation_code TEXT,
+      charge_id TEXT,
+      payment_method TEXT,
+      payment_channel TEXT,
+      amount REAL,
+      currency TEXT,
+      duration_days INTEGER NOT NULL DEFAULT 0,
+      online_features_enabled INTEGER NOT NULL DEFAULT 0 CHECK(online_features_enabled IN (0,1)),
+      internal_uid TEXT,
+      machine_hash TEXT,
+      metadata TEXT,
+      activated_at DATETIME,
+      expires_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
   migrateGradingTables();
 
   // Insert default school info if not exists
@@ -848,6 +875,9 @@ function bootstrapCurrentDatabase() {
     CREATE INDEX IF NOT EXISTS idx_results_student ON exam_results(student_id);
     CREATE INDEX IF NOT EXISTS idx_exam_subject_profiles_exam ON exam_subject_grading_profiles(exam_id);
     CREATE INDEX IF NOT EXISTS idx_exam_merge_sources_exam ON exam_merge_sources(exam_id);
+    CREATE INDEX IF NOT EXISTS idx_subscription_records_status ON subscription_records(status);
+    CREATE INDEX IF NOT EXISTS idx_subscription_records_plan ON subscription_records(plan_kind);
+    CREATE INDEX IF NOT EXISTS idx_subscription_records_charge_id ON subscription_records(charge_id);
   `);
 
   // Backfill enrollments for existing data: every student gets all compulsory subjects.
@@ -918,6 +948,7 @@ export function resetEducationData(nextCountry) {
     'classes',
     'user_class_assignments',
     'grade_criteria',
+    'subscription_records',
     'users',
   ];
 

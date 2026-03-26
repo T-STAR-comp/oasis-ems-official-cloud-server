@@ -32,10 +32,54 @@ function hasActiveAdminAccount() {
   return Boolean(row);
 }
 
+function getRecordedSchoolActivationStatus(schoolId) {
+  const normalizedSchoolId = normalizeSchoolId(schoolId);
+  if (!normalizedSchoolId) return null;
+
+  db.prepare(`
+    UPDATE subscription_records
+    SET status = 'expired',
+        updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'active'
+      AND expires_at IS NOT NULL
+      AND expires_at <= CURRENT_TIMESTAMP
+  `).run();
+
+  const row = db.prepare(`
+    SELECT plan_kind, activated_at, expires_at
+    FROM subscription_records
+    WHERE status = 'active'
+      AND online_features_enabled = 1
+      AND school_id = ?
+    ORDER BY expires_at DESC, created_at DESC
+    LIMIT 1
+  `).get(normalizedSchoolId);
+
+  if (!row) return null;
+
+  const expiresAt = Math.floor(new Date(row.expires_at || 0).getTime() / 1000);
+  return {
+    active: expiresAt > Math.floor(Date.now() / 1000),
+    schoolId: normalizedSchoolId,
+    expiresAt,
+    activatedAt: row.activated_at || null,
+    label: row.plan_kind === 'trial' ? 'Free Trial' : 'Digital Subscription',
+  };
+}
+
 async function fetchSchoolActivationStatus(schoolId) {
   const normalizedSchoolId = normalizeSchoolId(schoolId);
   if (!normalizedSchoolId) {
     throw createPolicyError('School ID is missing for this cloud school.', 403);
+  }
+
+  const recorded = getRecordedSchoolActivationStatus(normalizedSchoolId);
+  if (recorded) {
+    schoolStatusCache.set(normalizedSchoolId, {
+      value: recorded,
+      expiresAt: Date.now() + STATUS_CACHE_TTL_MS,
+    });
+    return recorded;
   }
 
   const cached = schoolStatusCache.get(normalizedSchoolId);
