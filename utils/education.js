@@ -103,6 +103,22 @@ export function getGradeDisplayMode(system) {
   return isPointBasedSystem(system) ? 'points' : 'grade';
 }
 
+export function getReportLabels(country) {
+  const normalized = normalizeCountry(country || DEFAULT_COUNTRY);
+  if (normalized === 'Nigeria') {
+    return {
+      classLabel: 'Class',
+      teacherLabel: 'Class Teacher',
+      termLabel: 'Term / Session',
+    };
+  }
+  return {
+    classLabel: 'Form / Class',
+    teacherLabel: 'Form Teacher',
+    termLabel: 'Term / Academic Year',
+  };
+}
+
 export function getFallbackGrade(system) {
   if (system === 'msce') {
     return { grade: '9', points: 9, remark: 'Fail' };
@@ -241,19 +257,7 @@ const NIGERIA_SSS_SUBJECTS = [
 ];
 
 export function getDefaultClassesForCountry(country, year) {
-  const normalized = normalizeCountry(country);
-  const academicYear = String(year || new Date().getFullYear());
-
-  if (normalized === 'Nigeria') {
-    // Nigerian schools create classes manually per school policy.
-    return [];
-  }
-
-  return ['Form 1', 'Form 2', 'Form 3', 'Form 4'].map((name) => ({
-    name,
-    year: academicYear,
-    min_subjects: 6,
-    max_subjects: 12,
-    subjects: MALAWI_SUBJECTS,
-  }));
+  void country;
+  void year;
+  return [];
 }

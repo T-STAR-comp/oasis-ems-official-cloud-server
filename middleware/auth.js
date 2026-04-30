@@ -2,7 +2,10 @@ import jwt from 'jsonwebtoken';
 import db from '../db/database.js';
 import { assertTeacherAccessPolicy, normalizeSchoolId } from '../utils/accessPolicy.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production-2024';
+const JWT_SECRET = String(process.env.JWT_SECRET || '').trim();
+if (!JWT_SECRET) {
+  throw new Error('Missing JWT_SECRET environment variable.');
+}
 const JWT_EXPIRES_IN = '24h';
 
 export function generateToken(user) {

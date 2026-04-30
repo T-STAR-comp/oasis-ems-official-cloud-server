@@ -3,7 +3,6 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
-import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import {
@@ -11,7 +10,6 @@ import {
   normalizeCountry,
   ALL_GRADING_SYSTEMS,
   getDefaultCriteriaForSystem,
-  getDefaultClassesForCountry,
   getGradingSystemsForCountry,
 } from '../utils/education.js';
 
@@ -329,6 +327,23 @@ function ensureSchoolIdentity() {
   return { schoolId, country: normalizeCountry(country) };
 }
 
+export function isFreshBootstrapState() {
+  const userCount = Number(db.prepare('SELECT COUNT(*) as count FROM users').get()?.count || 0);
+  if (userCount > 0) return false;
+
+  const operationalTables = [
+    'students',
+    'exams',
+    'exam_results',
+    'user_class_assignments',
+  ];
+
+  return !operationalTables.some((table) => {
+    const count = Number(db.prepare(`SELECT COUNT(*) as count FROM ${table}`).get()?.count || 0);
+    return count > 0;
+  });
+}
+
 function ensureTableHasGradingSystems(tableName, systems) {
   const sql = db.prepare(
     `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`
@@ -551,45 +566,6 @@ function seedGradeCriteriaForCountry(country) {
   });
 }
 
-function seedDefaultClasses(country) {
-  const templates = getDefaultClassesForCountry(country);
-  if (!templates.length) return;
-
-  const insertClass = db.prepare(`
-    INSERT INTO classes (id, name, year, min_subjects, max_subjects)
-    VALUES (?, ?, ?, ?, ?)
-  `);
-  const insertSubject = db.prepare(`
-    INSERT INTO subjects (id, class_id, name, code, is_compulsory, teacher_name)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `);
-
-  const tx = db.transaction(() => {
-    templates.forEach((template) => {
-      const classId = crypto.randomUUID();
-      insertClass.run(
-        classId,
-        template.name,
-        template.year,
-        Number(template.min_subjects || 6),
-        Number(template.max_subjects || 12)
-      );
-      template.subjects.forEach((subject) => {
-        const subjectId = crypto.randomUUID();
-        insertSubject.run(
-          subjectId,
-          classId,
-          subject.name,
-          subject.code,
-          Number(subject.is_compulsory || 0),
-          null
-        );
-      });
-    });
-  });
-  tx();
-}
-
 function bootstrapCurrentDatabase() {
   const ensureColumn = (table, column, definition) => {
     const columns = db.prepare(`PRAGMA table_info(${table})`).all();
@@ -637,6 +613,7 @@ function bootstrapCurrentDatabase() {
       semester1_end_date TEXT,
       semester2_start_date TEXT,
       semester2_end_date TEXT,
+      report_card_design TEXT,
       country TEXT NOT NULL DEFAULT '${DEFAULT_COUNTRY}',
       school_id TEXT,
       oae_enabled INTEGER NOT NULL DEFAULT 0,
@@ -655,6 +632,7 @@ function bootstrapCurrentDatabase() {
   ensureColumn('school_info', 'semester1_end_date', 'semester1_end_date TEXT');
   ensureColumn('school_info', 'semester2_start_date', 'semester2_start_date TEXT');
   ensureColumn('school_info', 'semester2_end_date', 'semester2_end_date TEXT');
+  ensureColumn('school_info', 'report_card_design', 'report_card_design TEXT');
   ensureColumn('school_info', 'country', `country TEXT NOT NULL DEFAULT '${DEFAULT_COUNTRY}'`);
   ensureColumn('school_info', 'school_id', 'school_id TEXT');
   ensureColumn('school_info', 'oae_enabled', 'oae_enabled INTEGER NOT NULL DEFAULT 0');
@@ -889,23 +867,6 @@ function bootstrapCurrentDatabase() {
     WHERE sub.is_compulsory = 1
   `);
 
-  const classExists = db.prepare('SELECT id FROM classes LIMIT 1').get();
-  if (!classExists) {
-    seedDefaultClasses(country);
-  }
-
-  // Create default admin user if no users exist
-  const userExists = db.prepare('SELECT id FROM users LIMIT 1').get();
-  if (!userExists) {
-    const hashedPassword = bcrypt.hashSync('admin123', 12);
-    db.prepare(`
-      INSERT INTO users (id, username, email, password, role, full_name)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run('admin-001', 'admin', 'admin@school.com', hashedPassword, 'admin', 'System Administrator');
-    
-    console.log('📝 Default admin created: username=admin, password=admin123');
-  }
-
   ensureInternalUid();
   ensureSchoolIdentity();
   console.log('✅ Database initialized successfully');
@@ -988,14 +949,7 @@ export function resetEducationData(nextCountry) {
   });
   tx();
 
-  const hashedPassword = bcrypt.hashSync('admin123', 12);
-  db.prepare(`
-    INSERT INTO users (id, username, email, password, role, full_name)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run('admin-001', 'admin', 'admin@school.com', hashedPassword, 'admin', 'System Administrator');
-
   seedGradeCriteriaForCountry(country);
-  seedDefaultClasses(country);
 
   return { country, schoolId };
 }

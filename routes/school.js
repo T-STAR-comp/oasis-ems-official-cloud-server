@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import db, { resetEducationData } from '../db/database.js';
 import { authenticateToken, getAssignedClassIds, isAdminUser, requireRole } from '../middleware/auth.js';
 import { getGradingSystemsForCountry, isSupportedGradingSystem, normalizeCountry, SUPPORTED_COUNTRIES } from '../utils/education.js';
+import { DEFAULT_REPORT_CARD_DESIGN, normalizeReportCardDesign } from '../utils/reportCardDesign.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -110,6 +111,59 @@ router.get('/education', (req, res) => {
     country: normalizeCountry(schoolInfo?.country),
     supported_countries: SUPPORTED_COUNTRIES,
   });
+});
+
+router.get('/report-card-design', authenticateToken, requireRole('admin'), (req, res) => {
+  const schoolInfo = db.prepare('SELECT report_card_design FROM school_info WHERE id = 1').get();
+  const design = schoolInfo?.report_card_design
+    ? normalizeReportCardDesign(schoolInfo.report_card_design)
+    : DEFAULT_REPORT_CARD_DESIGN;
+  res.json({
+    design,
+    using_custom: Boolean(design.enabled),
+  });
+});
+
+router.put('/report-card-design', authenticateToken, requireRole('admin'), (req, res, next) => {
+  try {
+    const normalized = normalizeReportCardDesign(req.body?.design || {});
+    const design = {
+      ...normalized,
+      enabled: true,
+    };
+
+    db.prepare(`
+      UPDATE school_info
+      SET report_card_design = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1
+    `).run(JSON.stringify(design));
+
+    res.json({
+      message: 'Report card design saved successfully',
+      design,
+      using_custom: true,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/report-card-design', authenticateToken, requireRole('admin'), (req, res, next) => {
+  try {
+    db.prepare(`
+      UPDATE school_info
+      SET report_card_design = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1
+    `).run();
+
+    res.json({
+      message: 'Default report card restored successfully',
+      design: DEFAULT_REPORT_CARD_DESIGN,
+      using_custom: false,
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 // Update school info

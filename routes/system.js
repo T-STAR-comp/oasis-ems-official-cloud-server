@@ -1,5 +1,10 @@
 import express from 'express';
-import db, { initializeDatabase, resolveSchoolIdFromImportPayload, runWithSchoolContext } from '../db/database.js';
+import db, {
+  initializeDatabase,
+  isFreshBootstrapState,
+  resolveSchoolIdFromImportPayload,
+  runWithSchoolContext,
+} from '../db/database.js';
 import { authenticateToken, isAdminUser } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -65,30 +70,27 @@ function applyImportPayload(payload) {
   tx(payload || {});
 }
 
-function isFreshBootstrapState() {
-  const userCount = Number(db.prepare('SELECT COUNT(*) as count FROM users').get()?.count || 0);
-  if (userCount > 1) return false;
+function hasValidBootstrapGrant(bootstrap) {
+  const internalUid = String(bootstrap?.internal_uid || '').trim();
+  const chargeId = String(bootstrap?.charge_id || '').trim();
+  if (!internalUid && !chargeId) {
+    return false;
+  }
 
-  // "Fresh" includes seeded defaults (classes/subjects/criteria) so first migration
-  // can run without requiring cloud login.
-  const operationalTables = [
-    'students',
-    'exams',
-    'exam_results',
-    'user_class_assignments',
-  ];
-  const hasOperationalData = operationalTables.some((table) => {
-    const count = Number(db.prepare(`SELECT COUNT(*) as count FROM ${table}`).get()?.count || 0);
-    return count > 0;
-  });
-  if (hasOperationalData) return false;
+  const row = db.prepare(`
+    SELECT id
+    FROM subscription_records
+    WHERE online_features_enabled = 1
+      AND status = 'active'
+      AND (
+        (? != '' AND internal_uid = ?)
+        OR (? != '' AND charge_id = ?)
+      )
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(internalUid, internalUid, chargeId, chargeId);
 
-  const school = db.prepare('SELECT name, address, phone, email FROM school_info WHERE id = 1').get();
-  if (!school) return true;
-  const hasConfiguredSchoolInfo = [school.address, school.phone, school.email]
-    .some((value) => String(value || '').trim().length > 0);
-  const hasCustomName = String(school.name || '').trim() && String(school.name || '').trim() !== 'My School';
-  return !hasConfiguredSchoolInfo && !hasCustomName;
+  return Boolean(row);
 }
 
 router.get('/export', authenticateToken, (req, res) => {
@@ -102,7 +104,7 @@ router.get('/export', authenticateToken, (req, res) => {
 });
 
 router.post('/import-bootstrap', (req, res) => {
-  const { data } = req.body || {};
+  const { data, bootstrap } = req.body || {};
   if (!data || typeof data !== 'object') {
     return res.status(400).json({ error: 'Invalid migration payload' });
   }
@@ -120,6 +122,12 @@ router.post('/import-bootstrap', (req, res) => {
         if (!ensureAdmin(req, res)) return;
         applyImportPayload(data);
         return res.json({ message: 'Migration import completed', school_id: schoolId });
+      });
+    }
+
+    if (!hasValidBootstrapGrant(bootstrap)) {
+      return res.status(403).json({
+        error: 'Cloud bootstrap requires an active online-enabled subscription from the source installation.',
       });
     }
 

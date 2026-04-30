@@ -261,6 +261,77 @@ router.post('/trial/activate', async (req, res) => {
   }
 });
 
+router.post('/manual/activate', async (req, res) => {
+  try {
+    const activationKey = String(req.body?.activation_key || '').trim();
+    const machineHash = String(req.body?.machine_hash || '').trim();
+    if (!activationKey) {
+      return res.status(400).json({ error: 'activation_key is required.' });
+    }
+    if (!machineHash) {
+      return res.status(400).json({ error: 'machine_hash is required.' });
+    }
+
+    const schoolId = normalizeSchoolId(req.body?.school_id);
+    const country = normalizeSubscriptionCountry(req.body?.country);
+    const schoolName = String(req.body?.school_name || '').trim();
+    const schoolEmail = String(req.body?.school_email || '').trim().toLowerCase();
+    const activation = await postJson(`${LICENSE_SERVER_URL}/activate`, {
+      machine_hash: machineHash,
+      activation_key: activationKey,
+      app: String(req.body?.app || '').trim() || 'oasis-ems',
+      version: String(req.body?.version || '').trim() || 'desktop',
+      school_id: schoolId || undefined,
+    });
+
+    if (!schoolId) {
+      return res.json({
+        ...activation,
+        activation_server_url: LICENSE_SERVER_URL,
+        plan_kind: 'manual_offline',
+        online_features_enabled: false,
+      });
+    }
+
+    const result = await runWithSchoolContext(schoolId, async () => {
+      syncSchoolInfo({ schoolId, country, schoolName, schoolEmail });
+
+      insertSubscriptionRecord({
+        schoolId,
+        country,
+        adminEmail: schoolEmail,
+        adminName: schoolName,
+        planKind: 'manual_offline',
+        status: 'active',
+        activationCode: String(activation.code || activationKey).trim(),
+        paymentMethod: 'activation_code',
+        paymentChannel: 'manual',
+        durationDays: Number(activation.duration_days || 0),
+        onlineFeaturesEnabled: false,
+        machineHash,
+        metadata: {
+          app: String(req.body?.app || '').trim() || 'oasis-ems',
+          version: String(req.body?.version || '').trim() || 'desktop',
+          activation_server_url: LICENSE_SERVER_URL,
+        },
+        activatedAt: unixToIso(activation.issued_at),
+        expiresAt: unixToIso(activation.expires_at),
+      });
+
+      return {
+        ...activation,
+        activation_server_url: LICENSE_SERVER_URL,
+        plan_kind: 'manual_offline',
+        online_features_enabled: false,
+      };
+    }, { allowCreate: true });
+
+    return res.json(result);
+  } catch (error) {
+    return res.status(500).json({ error: error.message || 'Failed to activate manual subscription.' });
+  }
+});
+
 router.post('/digital/initialize', async (req, res) => {
   try {
     const schoolId = normalizeSchoolId(req.body?.school_id);
@@ -269,6 +340,7 @@ router.post('/digital/initialize', async (req, res) => {
     }
 
     const country = normalizeSubscriptionCountry(req.body?.country);
+    const internalUid = String(req.body?.internal_uid || '').trim();
     const plan = getDigitalSubscriptionPlan(country);
     const paymentMethod = String(req.body?.payment_method || '').trim().toLowerCase();
     const methodMeta = getDigitalMethodMeta(country, paymentMethod);
@@ -338,6 +410,7 @@ router.post('/digital/initialize', async (req, res) => {
         currency: plan.currency,
         durationDays: plan.durationDays,
         onlineFeaturesEnabled: true,
+        internalUid,
         metadata: {
           provider: providerResponse,
         },
@@ -425,6 +498,7 @@ router.post('/digital/activate', async (req, res) => {
   try {
     const schoolId = normalizeSchoolId(req.body?.school_id);
     const activationKey = String(req.body?.activation_key || '').trim();
+    const internalUid = String(req.body?.internal_uid || '').trim();
     const machineHash = String(req.body?.machine_hash || '').trim();
     if (!schoolId || !activationKey || !machineHash) {
       return res.status(400).json({ error: 'school_id, activation_key, and machine_hash are required.' });
@@ -455,6 +529,7 @@ router.post('/digital/activate', async (req, res) => {
         db.prepare(`
           UPDATE subscription_records
           SET status = 'active',
+              internal_uid = COALESCE(?, internal_uid),
               machine_hash = ?,
               activated_at = ?,
               expires_at = ?,
@@ -462,6 +537,7 @@ router.post('/digital/activate', async (req, res) => {
               updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
         `).run(
+          internalUid || null,
           machineHash,
           unixToIso(activation.issued_at),
           unixToIso(activation.expires_at),
@@ -481,6 +557,7 @@ router.post('/digital/activate', async (req, res) => {
           paymentChannel: 'digital',
           durationDays: Number(activation.duration_days || DIGITAL_SUBSCRIPTION_DURATION_DAYS),
           onlineFeaturesEnabled: true,
+          internalUid,
           machineHash,
           activatedAt: unixToIso(activation.issued_at),
           expiresAt: unixToIso(activation.expires_at),

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import db from '../db/database.js';
 import { authenticateToken, ensureClassAccess } from '../middleware/auth.js';
 import { rankStudentsByExam, getGrade, formatRank, calculateStudentResults, getGradeCriteria } from '../utils/grading.js';
+import { renderStudentReportCardPage } from '../utils/reportCardPdf.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -386,6 +387,32 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
   const overallGrade = getOverallGradeWithEnglishRule(exam, averageScore, results);
   const passFail = getPassFailRemark(exam, results);
 
+  const customDoc = new PDFDocument({ margin: 24, size: 'A4' });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${student.name.replace(/\s+/g, '_')}_report_card.pdf"`);
+  customDoc.pipe(res);
+  renderStudentReportCardPage({
+    doc: customDoc,
+    schoolInfo,
+    student,
+    exam,
+    rankingsCount: rankings.length,
+    studentRank: studentRanking?.rank || 0,
+    totalPoints: studentRanking?.totalPoints,
+    formTeacherName,
+    logoPath,
+    criteria,
+    results,
+    totalScore,
+    overallGrade,
+    passFail,
+    subjectTeacherMap,
+    subjectRankMaps,
+    studentId,
+  });
+  customDoc.end();
+  return;
+
   const doc = new PDFDocument({ margin: 24, size: 'A4' });
 
   res.setHeader('Content-Type', 'application/pdf');
@@ -680,6 +707,48 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
   const currentExamMax = Math.max(1, Number(exam.max_score || 100));
   const caPercentLabel = useEndTermComposite ? componentExamMax : componentWeight;
   const etPercentLabel = useEndTermComposite ? remainingToHundred : currentWeight;
+
+  const customDoc = new PDFDocument({ margin: 24, size: 'A4' });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${exam.class_name}_${exam.name}_student_reports.pdf"`);
+  customDoc.pipe(res);
+
+  rankings.forEach((entry, index) => {
+    if (index > 0) customDoc.addPage();
+
+    const student = entry.student;
+    const calculated = calculateStudentResults(examId, student.id);
+    const results = calculated.results
+      .slice()
+      .sort((a, b) => (a.subject_name || '').localeCompare(b.subject_name || ''));
+    const averageScore = calculated.averageScore;
+    const totalScore = calculated.totalScore;
+    const overallGrade = getOverallGradeWithEnglishRule(exam, averageScore, results);
+    const passFail = getPassFailRemark(exam, results);
+
+    renderStudentReportCardPage({
+      doc: customDoc,
+      schoolInfo,
+      student,
+      exam,
+      rankingsCount: rankings.length,
+      studentRank: entry.rank || 0,
+      totalPoints: entry.totalPoints,
+      formTeacherName,
+      logoPath,
+      criteria,
+      results,
+      totalScore,
+      overallGrade,
+      passFail,
+      subjectTeacherMap,
+      subjectRankMaps,
+      studentId: student.id,
+    });
+  });
+
+  customDoc.end();
+  return;
 
   const doc = new PDFDocument({ margin: 24, size: 'A4' });
   res.setHeader('Content-Type', 'application/pdf');
