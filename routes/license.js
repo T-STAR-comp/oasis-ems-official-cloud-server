@@ -11,7 +11,7 @@ import {
   isDigitalMethodAllowed,
   normalizeSubscriptionCountry,
   splitFullName,
-} from '../../shared/subscriptions.js';
+} from '../shared/subscriptions.js';
 
 const router = express.Router();
 
