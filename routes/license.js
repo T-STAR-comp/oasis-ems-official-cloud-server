@@ -29,6 +29,7 @@ const SMTP_SECURE = String(process.env.SMTP_SECURE || '').trim().toLowerCase() =
 const SMTP_USER = String(process.env.SMTP_USER || '').trim();
 const SMTP_PASS = String(process.env.SMTP_PASS || '').trim();
 const SMTP_FROM = String(process.env.SMTP_FROM || SMTP_USER || 'no-reply@oasis-ems.local').trim();
+const MALAWI_TEST_PAYCHANGU_AMOUNT = 50;
 
 function normalizeSchoolId(value) {
   return String(value || '').trim().toUpperCase();
@@ -512,6 +513,8 @@ router.post('/digital/initialize', async (req, res) => {
       syncSchoolInfo({ schoolId, country, schoolName, schoolEmail });
 
       const chargeId = `sub_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      // Temporary test override: charge MWK 50 in PayChangu for Malawi subscriptions.
+      const chargeAmount = plan.currency === 'MWK' ? MALAWI_TEST_PAYCHANGU_AMOUNT : plan.amount;
       let providerResponse;
 
       if (methodMeta.channel === 'mobile_money') {
@@ -529,7 +532,7 @@ router.post('/digital/initialize', async (req, res) => {
             email: adminEmail,
             first_name: firstName || 'Oasis',
             last_name: lastName || 'EMS',
-            amount: plan.amount,
+            amount: chargeAmount,
             charge_id: chargeId,
           },
         });
@@ -546,7 +549,7 @@ router.post('/digital/initialize', async (req, res) => {
             cvv: String(req.body?.cvv || '').trim(),
             expiry_month: String(req.body?.expiry_month || '').trim(),
             expiry_year: String(req.body?.expiry_year || '').trim(),
-            amount: plan.amount,
+            amount: chargeAmount,
             currency: plan.currency,
             email: adminEmail,
             charge_id: chargeId,
@@ -564,7 +567,7 @@ router.post('/digital/initialize', async (req, res) => {
         chargeId,
         paymentMethod,
         paymentChannel: methodMeta.channel,
-        amount: plan.amount,
+        amount: chargeAmount,
         currency: plan.currency,
         durationDays: plan.durationDays,
         onlineFeaturesEnabled: true,
@@ -579,7 +582,7 @@ router.post('/digital/initialize', async (req, res) => {
         charge_id: chargeId,
         payment_method: paymentMethod,
         payment_channel: methodMeta.channel,
-        amount: plan.amount,
+        amount: chargeAmount,
         currency: plan.currency,
         duration_days: plan.durationDays,
       };
