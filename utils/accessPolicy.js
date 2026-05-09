@@ -1,11 +1,5 @@
 import db from '../db/database.js';
 
-const LICENSE_SERVER_URL = String(
-  process.env.OASIS_LICENSE_SERVER_URL || 'https://oasis-ems-official-license-server-production.up.railway.app'
-).trim().replace(/\/+$/, '');
-const STATUS_CACHE_TTL_MS = Number(process.env.OASIS_LICENSE_STATUS_CACHE_MS || 5 * 60 * 1000);
-const schoolStatusCache = new Map();
-
 function createPolicyError(message, status = 403) {
   const error = new Error(message);
   error.status = status;
@@ -75,48 +69,16 @@ async function fetchSchoolActivationStatus(schoolId) {
 
   const recorded = getRecordedSchoolActivationStatus(normalizedSchoolId);
   if (recorded) {
-    schoolStatusCache.set(normalizedSchoolId, {
-      value: recorded,
-      expiresAt: Date.now() + STATUS_CACHE_TTL_MS,
-    });
     return recorded;
   }
 
-  const cached = schoolStatusCache.get(normalizedSchoolId);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.value;
-  }
-
-  if (!LICENSE_SERVER_URL) {
-    throw createPolicyError('License server is not configured for teacher access validation.', 503);
-  }
-
-  let response;
-  try {
-    response = await fetch(`${LICENSE_SERVER_URL}/schools/${encodeURIComponent(normalizedSchoolId)}/status`);
-  } catch (_error) {
-    throw createPolicyError('Unable to verify school subscription right now.', 503);
-  }
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw createPolicyError(payload?.error || 'Unable to verify school subscription right now.', 503);
-  }
-
-  const result = {
-    active: payload?.active === true,
-    schoolId: normalizeSchoolId(payload?.school_id || normalizedSchoolId),
-    expiresAt: Number(payload?.expires_at || 0),
-    activatedAt: payload?.activated_at || null,
-    label: payload?.label || null,
+  return {
+    active: false,
+    schoolId: normalizedSchoolId,
+    expiresAt: 0,
+    activatedAt: null,
+    label: null,
   };
-
-  schoolStatusCache.set(normalizedSchoolId, {
-    value: result,
-    expiresAt: Date.now() + STATUS_CACHE_TTL_MS,
-  });
-
-  return result;
 }
 
 export function assertSchoolIdMatchesCurrent(requestedSchoolId) {
