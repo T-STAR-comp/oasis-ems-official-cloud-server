@@ -32,9 +32,120 @@ const SMTP_FROM = String(process.env.SMTP_FROM || SMTP_USER || 'no-reply@oasis-e
 const MALAWI_TEST_PAYCHANGU_AMOUNT = 50;
 const PENDING_VERIFICATION_WINDOW_MS = 5 * 60 * 1000;
 const PENDING_VERIFICATION_WINDOW_MINUTES = 5;
+const PAYMENT_LOG_PREFIX = '[payment-flow]';
+
+const FULLY_REDACTED_LOG_KEYS = new Set([
+  'authorization',
+  'api_key',
+  'cvv',
+  'password',
+  'paychangu_api_key',
+  'paychangu_secret_key',
+  'secret',
+  'secret_key',
+  'smtp_pass',
+  'token',
+]);
+
+const PARTIALLY_MASKED_LOG_KEYS = new Set([
+  'activation_code',
+  'activation_key',
+  'app_secret',
+  'card_number',
+  'charge_id',
+  'email',
+  'internal_uid',
+  'machine_hash',
+  'mobile',
+  'phone_number',
+  'school_email',
+]);
 
 function normalizeSchoolId(value) {
   return String(value || '').trim().toUpperCase();
+}
+
+function maskValue(value, { visibleStart = 2, visibleEnd = 2 } = {}) {
+  const raw = String(value || '').trim();
+  if (!raw) return raw;
+  if (raw.length <= visibleStart + visibleEnd) {
+    return '*'.repeat(raw.length);
+  }
+  return `${raw.slice(0, visibleStart)}${'*'.repeat(raw.length - visibleStart - visibleEnd)}${raw.slice(-visibleEnd)}`;
+}
+
+function maskEmail(value) {
+  const email = String(value || '').trim();
+  if (!email.includes('@')) return maskValue(email, { visibleStart: 1, visibleEnd: 1 });
+  const [localPart, domain] = email.split('@');
+  return `${maskValue(localPart, { visibleStart: 1, visibleEnd: 1 })}@${domain}`;
+}
+
+function sanitizePaymentLogValue(value, key = '') {
+  const normalizedKey = String(key || '').trim().toLowerCase();
+
+  if (value === null || typeof value === 'undefined') {
+    return value;
+  }
+
+  if (FULLY_REDACTED_LOG_KEYS.has(normalizedKey)) {
+    return '[redacted]';
+  }
+
+  if (normalizedKey === 'email' || normalizedKey === 'school_email') {
+    return maskEmail(value);
+  }
+
+  if (normalizedKey === 'card_number') {
+    return maskValue(value, { visibleStart: 0, visibleEnd: 4 });
+  }
+
+  if (
+    normalizedKey === 'mobile' ||
+    normalizedKey === 'phone_number' ||
+    normalizedKey === 'activation_code' ||
+    normalizedKey === 'activation_key' ||
+    normalizedKey === 'charge_id' ||
+    normalizedKey === 'internal_uid' ||
+    normalizedKey === 'machine_hash' ||
+    PARTIALLY_MASKED_LOG_KEYS.has(normalizedKey)
+  ) {
+    return maskValue(value, { visibleStart: 4, visibleEnd: 4 });
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizePaymentLogValue(item, key));
+  }
+
+  if (typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([entryKey, entryValue]) => [
+        entryKey,
+        sanitizePaymentLogValue(entryValue, entryKey),
+      ])
+    );
+  }
+
+  return value;
+}
+
+function logPaymentEvent(event, details = {}) {
+  console.log(
+    `${PAYMENT_LOG_PREFIX} ${new Date().toISOString()} ${event}`,
+    sanitizePaymentLogValue(details)
+  );
+}
+
+function logPaymentError(event, error, details = {}) {
+  const payload = sanitizePaymentLogValue(details);
+  console.error(`${PAYMENT_LOG_PREFIX} ${new Date().toISOString()} ${event}`, {
+    ...payload,
+    error: {
+      message: error?.message || 'Unknown payment error.',
+      stack: error?.stack || null,
+      statusCode: Number(error?.statusCode || error?.status || 0) || null,
+    },
+  });
 }
 
 function createHttpError(message, statusCode = 400, details = {}) {
@@ -82,18 +193,53 @@ function assertPaychanguConfigured() {
   }
 }
 
-async function paychanguRequest(endpoint, { method = 'GET', body } = {}) {
+async function paychanguRequest(endpoint, { method = 'GET', body, logContext = {} } = {}) {
   assertPaychanguConfigured();
   const url = `${PAYCHANGU_BASE_URL}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
-  const response = await fetch(url, {
+  const startedAt = Date.now();
+  logPaymentEvent('paychangu.request.start', {
+    ...logContext,
+    endpoint,
     method,
-    headers: {
-      Authorization: `Bearer ${PAYCHANGU_SECRET_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: body ? JSON.stringify(body) : undefined,
+    url,
+    request_body: body || null,
   });
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${PAYCHANGU_SECRET_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (error) {
+    logPaymentError('paychangu.request.network_error', error, {
+      ...logContext,
+      endpoint,
+      method,
+      url,
+      duration_ms: Date.now() - startedAt,
+      request_body: body || null,
+    });
+    throw error;
+  }
+
   const data = await response.json().catch(() => ({}));
+  const durationMs = Date.now() - startedAt;
+  logPaymentEvent(response.ok ? 'paychangu.request.success' : 'paychangu.request.failure', {
+    ...logContext,
+    endpoint,
+    method,
+    url,
+    status_code: response.status,
+    duration_ms: durationMs,
+    request_body: body || null,
+    response_body: data,
+  });
+
   if (!response.ok) {
     throw new Error(data?.message || data?.error || `PayChangu request failed (${response.status}).`);
   }
@@ -121,6 +267,13 @@ function getMailTransport() {
 async function sendActivationEmail({ email, code, durationDays, label, schoolId }) {
   const transporter = getMailTransport();
   if (!transporter) {
+    logPaymentEvent('payment.email.skipped', {
+      school_id: schoolId,
+      email,
+      duration_days: durationDays,
+      label,
+      reason: 'SMTP is not configured on the cloud server.',
+    });
     return { ok: false, error: 'SMTP is not configured on the cloud server.' };
   }
 
@@ -142,11 +295,27 @@ async function sendActivationEmail({ email, code, durationDays, label, schoolId 
   }
   lines.push('', 'Enter this code in Oasis EMS to activate online access.', '', 'Regards,', 'Oasis EMS Team');
 
+  logPaymentEvent('payment.email.start', {
+    school_id: schoolId,
+    email,
+    activation_code: code,
+    duration_days: durationDays,
+    label,
+  });
+
   await transporter.sendMail({
     from: SMTP_FROM,
     to: email,
     subject,
     text: lines.join('\n'),
+  });
+
+  logPaymentEvent('payment.email.success', {
+    school_id: schoolId,
+    email,
+    activation_code: code,
+    duration_days: durationDays,
+    label,
   });
 
   return { ok: true };
@@ -209,8 +378,12 @@ function extractOperatorEntries(payload) {
   return entries;
 }
 
-async function resolveMobileMoneyOperatorRefId(methodCode) {
-  const payload = await paychanguRequest('/mobile-money');
+async function resolveMobileMoneyOperatorRefId(methodCode, logContext = {}) {
+  logPaymentEvent('paychangu.mobile_money.operator_lookup.start', {
+    ...logContext,
+    requested_method: methodCode,
+  });
+  const payload = await paychanguRequest('/mobile-money', { logContext });
   const operators = extractOperatorEntries(payload);
   const needle = String(methodCode || '').trim().toLowerCase();
   const match = operators.find((entry) => JSON.stringify(entry).toLowerCase().includes(needle));
@@ -223,6 +396,12 @@ async function resolveMobileMoneyOperatorRefId(methodCode) {
   if (!refId) {
     throw new Error(`Could not find a PayChangu operator for ${needle}.`);
   }
+  logPaymentEvent('paychangu.mobile_money.operator_lookup.success', {
+    ...logContext,
+    requested_method: methodCode,
+    resolved_operator_ref_id: refId,
+    matched_operator: match || null,
+  });
   return String(refId);
 }
 
@@ -534,6 +713,7 @@ router.post('/manual/activate', async (req, res) => {
 });
 
 router.post('/digital/initialize', async (req, res) => {
+  const traceId = crypto.randomUUID().slice(0, 8);
   try {
     const schoolId = normalizeSchoolId(req.body?.school_id);
     if (!schoolId) {
@@ -545,6 +725,20 @@ router.post('/digital/initialize', async (req, res) => {
     const plan = getDigitalSubscriptionPlan(country);
     const paymentMethod = String(req.body?.payment_method || '').trim().toLowerCase();
     const methodMeta = getDigitalMethodMeta(country, paymentMethod);
+    const baseLogContext = {
+      trace_id: traceId,
+      route: 'digital.initialize',
+      school_id: schoolId,
+      country,
+      payment_method: paymentMethod,
+      payment_channel: methodMeta?.channel || null,
+      internal_uid: internalUid || null,
+    };
+    logPaymentEvent('digital.initialize.request_received', {
+      ...baseLogContext,
+      request_body: req.body || {},
+    });
+
     if (!isDigitalMethodAllowed(country, paymentMethod) || !methodMeta) {
       return res.status(400).json({ error: 'Unsupported payment method for this country.' });
     }
@@ -561,6 +755,18 @@ router.post('/digital/initialize', async (req, res) => {
       syncSchoolInfo({ schoolId, country, schoolName, schoolEmail });
 
       const latestLedgerRecord = findLatestDigitalLedgerRecordBySchool(schoolId);
+      logPaymentEvent('digital.initialize.latest_ledger_record', {
+        ...baseLogContext,
+        latest_record: latestLedgerRecord
+          ? {
+              id: latestLedgerRecord.id,
+              status: latestLedgerRecord.status,
+              charge_id: latestLedgerRecord.charge_id || null,
+              created_at: latestLedgerRecord.created_at || null,
+              updated_at: latestLedgerRecord.updated_at || null,
+            }
+          : null,
+      });
       if (latestLedgerRecord?.status === 'pending_activation') {
         throw createHttpError(
           'A payment for this School ID has already been verified. Use the activation code sent to your email to finish setup.',
@@ -593,6 +799,18 @@ router.post('/digital/initialize', async (req, res) => {
       const chargeAmount = plan.currency === 'MWK' ? MALAWI_TEST_PAYCHANGU_AMOUNT : plan.amount;
       const pendingExpiresAt = Date.now() + PENDING_VERIFICATION_WINDOW_MS;
       let providerResponse;
+      const paymentLogContext = {
+        ...baseLogContext,
+        charge_id: chargeId,
+        amount: chargeAmount,
+        currency: plan.currency,
+        duration_days: plan.durationDays,
+      };
+
+      logPaymentEvent('digital.initialize.preparing_provider_request', {
+        ...paymentLogContext,
+        pending_expires_at: timestampToIso(pendingExpiresAt),
+      });
 
       if (methodMeta.channel === 'mobile_money') {
         const phoneNumber = String(req.body?.phone_number || '').trim();
@@ -600,7 +818,7 @@ router.post('/digital/initialize', async (req, res) => {
           throw new Error('phone_number is required for mobile money payments.');
         }
         const { firstName, lastName } = splitFullName(adminName);
-        const operatorRefId = await resolveMobileMoneyOperatorRefId(paymentMethod);
+        const operatorRefId = await resolveMobileMoneyOperatorRefId(paymentMethod, paymentLogContext);
         providerResponse = await paychanguRequest('/mobile-money/payments/initialize', {
           method: 'POST',
           body: {
@@ -612,6 +830,7 @@ router.post('/digital/initialize', async (req, res) => {
             amount: chargeAmount,
             charge_id: chargeId,
           },
+          logContext: paymentLogContext,
         });
       } else {
         const requiredFields = ['card_number', 'cvv', 'expiry_month', 'expiry_year'];
@@ -631,10 +850,16 @@ router.post('/digital/initialize', async (req, res) => {
             email: adminEmail,
             charge_id: chargeId,
           },
+          logContext: paymentLogContext,
         });
       }
 
-      insertSubscriptionRecord({
+      logPaymentEvent('digital.initialize.provider_response_received', {
+        ...paymentLogContext,
+        provider_response: providerResponse,
+      });
+
+      const ledgerId = insertSubscriptionRecord({
         schoolId,
         country,
         adminEmail,
@@ -656,6 +881,12 @@ router.post('/digital/initialize', async (req, res) => {
         },
       });
 
+      logPaymentEvent('digital.initialize.ledger_record_created', {
+        ...paymentLogContext,
+        ledger_id: ledgerId,
+        pending_expires_at: timestampToIso(pendingExpiresAt),
+      });
+
       return {
         status: 'pending',
         charge_id: chargeId,
@@ -670,8 +901,18 @@ router.post('/digital/initialize', async (req, res) => {
       };
     }, { allowCreate: true });
 
+    logPaymentEvent('digital.initialize.completed', {
+      trace_id: traceId,
+      route: 'digital.initialize',
+      response: result,
+    });
     return res.json(result);
   } catch (error) {
+    logPaymentError('digital.initialize.failed', error, {
+      trace_id: traceId,
+      route: 'digital.initialize',
+      request_body: req.body || {},
+    });
     return res.status(Number(error?.statusCode || error?.status || 500)).json({
       error: error.message || 'Failed to initialize digital payment.',
     });
@@ -679,17 +920,48 @@ router.post('/digital/initialize', async (req, res) => {
 });
 
 router.post('/digital/verify-payment', async (req, res) => {
+  const traceId = crypto.randomUUID().slice(0, 8);
   try {
     const schoolId = normalizeSchoolId(req.body?.school_id);
     if (!schoolId) {
       return res.status(400).json({ error: 'school_id is required.' });
     }
 
+    const baseLogContext = {
+      trace_id: traceId,
+      route: 'digital.verify_payment',
+      school_id: schoolId,
+      requested_charge_id: String(req.body?.charge_id || '').trim() || null,
+    };
+    logPaymentEvent('digital.verify.request_received', {
+      ...baseLogContext,
+      request_body: req.body || {},
+    });
+
     const result = await runWithSchoolContext(schoolId, async () => {
       const record = findLatestDigitalLedgerRecordBySchool(schoolId);
       if (!record) {
         throw createHttpError('No pending payment request was found for this School ID.', 404);
       }
+
+      const paymentLogContext = {
+        ...baseLogContext,
+        charge_id: String(record.charge_id || '').trim() || null,
+        payment_method: record.payment_method || null,
+        payment_channel: record.payment_channel || null,
+        ledger_id: record.id,
+        ledger_status: record.status,
+      };
+      logPaymentEvent('digital.verify.ledger_record_loaded', {
+        ...paymentLogContext,
+        record_snapshot: {
+          status: record.status,
+          created_at: record.created_at || null,
+          updated_at: record.updated_at || null,
+          pending_expires_at: timestampToIso(getPendingVerificationDeadline(record)),
+        },
+      });
+
       if (record.status === 'pending_activation') {
         return {
           status: 'pending_activation',
@@ -719,8 +991,18 @@ router.post('/digital/verify-payment', async (req, res) => {
 
       const chargeId = String(record.charge_id || '').trim();
       const verification = record.payment_channel === 'card'
-        ? await paychanguRequest(`/charge-card/verify/${chargeId}`)
-        : await paychanguRequest(`/mobile-money/payments/${chargeId}/verify`);
+        ? await paychanguRequest(`/charge-card/verify/${chargeId}`, {
+            logContext: paymentLogContext,
+          })
+        : await paychanguRequest(`/mobile-money/payments/${chargeId}/verify`, {
+            logContext: paymentLogContext,
+          });
+
+      logPaymentEvent('digital.verify.provider_verification_received', {
+        ...paymentLogContext,
+        verification_payload: verification,
+        payment_successful: isPaychanguPaymentSuccessful(verification),
+      });
 
       if (!isPaychanguPaymentSuccessful(verification)) {
         throw createHttpError('Payment has not been confirmed yet.', 409);
@@ -759,6 +1041,13 @@ router.post('/digital/verify-payment', async (req, res) => {
         record.id
       );
 
+      logPaymentEvent('digital.verify.ledger_record_updated', {
+        ...paymentLogContext,
+        next_status: 'pending_activation',
+        activation_code: activationCode,
+        email_result: emailResult,
+      });
+
       return {
         status: 'pending_activation',
         charge_id: chargeId,
@@ -768,8 +1057,18 @@ router.post('/digital/verify-payment', async (req, res) => {
       };
     }, { allowCreate: true });
 
+    logPaymentEvent('digital.verify.completed', {
+      trace_id: traceId,
+      route: 'digital.verify_payment',
+      response: result,
+    });
     return res.json(result);
   } catch (error) {
+    logPaymentError('digital.verify.failed', error, {
+      trace_id: traceId,
+      route: 'digital.verify_payment',
+      request_body: req.body || {},
+    });
     return res.status(Number(error?.statusCode || error?.status || 500)).json({
       error: error.message || 'Failed to verify payment.',
     });
@@ -777,6 +1076,7 @@ router.post('/digital/verify-payment', async (req, res) => {
 });
 
 router.post('/digital/activate', async (req, res) => {
+  const traceId = crypto.randomUUID().slice(0, 8);
   try {
     const schoolId = normalizeSchoolId(req.body?.school_id);
     const activationKey = String(req.body?.activation_key || '').trim();
@@ -785,6 +1085,19 @@ router.post('/digital/activate', async (req, res) => {
     if (!schoolId || !activationKey || !machineHash) {
       return res.status(400).json({ error: 'school_id, activation_key, and machine_hash are required.' });
     }
+
+    const baseLogContext = {
+      trace_id: traceId,
+      route: 'digital.activate',
+      school_id: schoolId,
+      activation_key: activationKey,
+      internal_uid: internalUid || null,
+      machine_hash: machineHash,
+    };
+    logPaymentEvent('digital.activate.request_received', {
+      ...baseLogContext,
+      request_body: req.body || {},
+    });
 
     const result = await runWithSchoolContext(schoolId, async () => {
       const record = db.prepare(`
@@ -799,12 +1112,33 @@ router.post('/digital/activate', async (req, res) => {
         throw createHttpError('Invalid activation code.', 404);
       }
 
+      const paymentLogContext = {
+        ...baseLogContext,
+        charge_id: String(record.charge_id || '').trim() || null,
+        payment_method: record.payment_method || null,
+        payment_channel: record.payment_channel || null,
+        ledger_id: record.id,
+        ledger_status: record.status,
+      };
+      logPaymentEvent('digital.activate.ledger_record_loaded', {
+        ...paymentLogContext,
+        record_snapshot: {
+          status: record.status,
+          activated_at: record.activated_at || null,
+          expires_at: record.expires_at || null,
+        },
+      });
+
       const existingMachineHash = String(record.machine_hash || '').trim();
       if (record.status === 'active') {
         if (existingMachineHash && existingMachineHash !== machineHash) {
           throw createHttpError('Activation code has already been used on another device.', 409);
         }
         const activation = buildDigitalActivationPayload(record, schoolId);
+        logPaymentEvent('digital.activate.already_active', {
+          ...paymentLogContext,
+          activation_payload: activation,
+        });
         return {
           ...activation,
           charge_id: record.charge_id || null,
@@ -858,6 +1192,11 @@ router.post('/digital/activate', async (req, res) => {
       );
 
       const latest = db.prepare('SELECT * FROM subscription_records WHERE id = ?').get(record.id);
+      logPaymentEvent('digital.activate.ledger_record_updated', {
+        ...paymentLogContext,
+        next_status: 'active',
+        activation_payload: activation,
+      });
 
       return {
         ...activation,
@@ -871,8 +1210,18 @@ router.post('/digital/activate', async (req, res) => {
       };
     }, { allowCreate: true });
 
+    logPaymentEvent('digital.activate.completed', {
+      trace_id: traceId,
+      route: 'digital.activate',
+      response: result,
+    });
     return res.json(result);
   } catch (error) {
+    logPaymentError('digital.activate.failed', error, {
+      trace_id: traceId,
+      route: 'digital.activate',
+      request_body: req.body || {},
+    });
     return res.status(Number(error?.statusCode || error?.status || 500)).json({
       error: error.message || 'Failed to activate digital subscription.',
     });
