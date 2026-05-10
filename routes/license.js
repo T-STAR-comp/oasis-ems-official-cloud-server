@@ -33,6 +33,19 @@ const MALAWI_TEST_PAYCHANGU_AMOUNT = 50;
 const PENDING_VERIFICATION_WINDOW_MS = 5 * 60 * 1000;
 const PENDING_VERIFICATION_WINDOW_MINUTES = 5;
 const PAYMENT_LOG_PREFIX = '[payment-flow]';
+const PAYCHANGU_TEST_KEY_PREFIX = 'sec-test-';
+const PAYCHANGU_SANDBOX_MALAWI_MOBILE_NUMBERS = {
+  airtel: {
+    label: 'Airtel Money',
+    success: '990000000',
+    failed: '990000001',
+  },
+  tnm: {
+    label: 'TNM Mpamba',
+    success: '899817565',
+    failed: '899817566',
+  },
+};
 
 const FULLY_REDACTED_LOG_KEYS = new Set([
   'authorization',
@@ -63,6 +76,10 @@ const PARTIALLY_MASKED_LOG_KEYS = new Set([
 
 function normalizeSchoolId(value) {
   return String(value || '').trim().toUpperCase();
+}
+
+function isPaychanguSandboxKey() {
+  return PAYCHANGU_SECRET_KEY.startsWith(PAYCHANGU_TEST_KEY_PREFIX);
 }
 
 function maskValue(value, { visibleStart = 2, visibleEnd = 2 } = {}) {
@@ -166,6 +183,46 @@ function timestampToIso(value) {
   const timestamp = Number(value || 0);
   if (!timestamp) return null;
   return new Date(timestamp).toISOString();
+}
+
+function sanitizePhoneNumberForProvider(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const digits = raw.replace(/\D/g, '');
+  if (!digits) return '';
+  return raw.startsWith('+') ? `+${digits}` : digits;
+}
+
+function normalizeMobileNumberForComparison(value) {
+  let digits = String(value || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('265') && digits.length > 9) {
+    digits = digits.slice(3);
+  }
+  if (digits.startsWith('0') && digits.length >= 10) {
+    digits = digits.slice(1);
+  }
+  return digits;
+}
+
+function buildSandboxMobileMoneyWarning(paymentMethod, phoneNumber, providerMode) {
+  const normalizedMode = String(providerMode || '').trim().toLowerCase();
+  const sandboxMode = normalizedMode === 'sandbox' || normalizedMode === 'test' || (!normalizedMode && isPaychanguSandboxKey());
+  if (!sandboxMode) {
+    return null;
+  }
+
+  const provider = PAYCHANGU_SANDBOX_MALAWI_MOBILE_NUMBERS[String(paymentMethod || '').trim().toLowerCase()];
+  const recommended = provider
+    ? `${provider.success} (success) or ${provider.failed} (failed) for ${provider.label}`
+    : 'a PayChangu sandbox mobile money test number';
+  const normalizedPhone = normalizeMobileNumberForComparison(phoneNumber);
+
+  if (provider && normalizedPhone && normalizedPhone !== provider.success && normalizedPhone !== provider.failed) {
+    return `PayChangu is in sandbox mode, so a real PIN prompt will not be sent to this phone. Use ${recommended}, or switch the cloud server to a live PayChangu secret key.`;
+  }
+
+  return `PayChangu is in sandbox mode. Real handset PIN prompts are not sent in sandbox; use ${recommended}, or switch the cloud server to a live PayChangu secret key.`;
 }
 
 async function postJson(url, body) {
@@ -386,7 +443,10 @@ async function resolveMobileMoneyOperatorRefId(methodCode, logContext = {}) {
   const payload = await paychanguRequest('/mobile-money', { logContext });
   const operators = extractOperatorEntries(payload);
   const needle = String(methodCode || '').trim().toLowerCase();
-  const match = operators.find((entry) => JSON.stringify(entry).toLowerCase().includes(needle));
+  const exactShortCodeMatch = operators.find((entry) => String(entry?.short_code || '').trim().toLowerCase() === needle);
+  const nameMatch = operators.find((entry) => String(entry?.name || entry?.operator_name || '').trim().toLowerCase().includes(needle));
+  const refMatch = operators.find((entry) => String(entry?.ref_id || entry?.operator_ref_id || entry?.mobile_money_operator_ref_id || '').trim().toLowerCase() === needle);
+  const match = exactShortCodeMatch || nameMatch || refMatch;
   const refId =
     match?.mobile_money_operator_ref_id ||
     match?.operator_ref_id ||
@@ -813,7 +873,7 @@ router.post('/digital/initialize', async (req, res) => {
       });
 
       if (methodMeta.channel === 'mobile_money') {
-        const phoneNumber = String(req.body?.phone_number || '').trim();
+        const phoneNumber = sanitizePhoneNumberForProvider(req.body?.phone_number);
         if (!phoneNumber) {
           throw new Error('phone_number is required for mobile money payments.');
         }
@@ -859,6 +919,21 @@ router.post('/digital/initialize', async (req, res) => {
         provider_response: providerResponse,
       });
 
+      const providerMode = String(providerResponse?.data?.mode || providerResponse?.mode || '').trim().toLowerCase() || null;
+      const providerStatus = String(providerResponse?.data?.status || providerResponse?.status || '').trim().toLowerCase() || null;
+      const providerMessage = String(providerResponse?.message || '').trim() || null;
+      const sandboxWarning = methodMeta.channel === 'mobile_money'
+        ? buildSandboxMobileMoneyWarning(paymentMethod, req.body?.phone_number, providerMode)
+        : null;
+
+      if (sandboxWarning) {
+        logPaymentEvent('digital.initialize.sandbox_warning', {
+          ...paymentLogContext,
+          provider_mode: providerMode,
+          warning: sandboxWarning,
+        });
+      }
+
       const ledgerId = insertSubscriptionRecord({
         schoolId,
         country,
@@ -876,6 +951,10 @@ router.post('/digital/initialize', async (req, res) => {
         internalUid,
         metadata: {
           provider: providerResponse,
+          provider_mode: providerMode,
+          provider_status: providerStatus,
+          provider_message: providerMessage,
+          sandbox_warning: sandboxWarning,
           pending_expires_at: timestampToIso(pendingExpiresAt),
           verification_window_minutes: PENDING_VERIFICATION_WINDOW_MINUTES,
         },
@@ -898,6 +977,10 @@ router.post('/digital/initialize', async (req, res) => {
         pending_expires_at: timestampToIso(pendingExpiresAt),
         verification_window_minutes: PENDING_VERIFICATION_WINDOW_MINUTES,
         message: `Payment request created. Complete payment and verify it within ${PENDING_VERIFICATION_WINDOW_MINUTES} minutes.`,
+        provider_mode: providerMode,
+        provider_status: providerStatus,
+        provider_message: providerMessage,
+        warning: sandboxWarning,
       };
     }, { allowCreate: true });
 
