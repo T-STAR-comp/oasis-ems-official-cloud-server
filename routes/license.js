@@ -30,15 +30,18 @@ const SMTP_USER = String(process.env.SMTP_USER || '').trim();
 const SMTP_PASS = String(process.env.SMTP_PASS || '').trim();
 const SMTP_FROM = String(process.env.SMTP_FROM || SMTP_USER || 'no-reply@oasis-ems.local').trim();
 const MALAWI_TEST_PAYCHANGU_AMOUNT = 50;
+const PENDING_VERIFICATION_WINDOW_MS = 5 * 60 * 1000;
+const PENDING_VERIFICATION_WINDOW_MINUTES = 5;
 
 function normalizeSchoolId(value) {
   return String(value || '').trim().toUpperCase();
 }
 
-function createHttpError(message, statusCode = 400) {
+function createHttpError(message, statusCode = 400, details = {}) {
   const error = new Error(message);
   error.statusCode = statusCode;
   error.status = statusCode;
+  Object.assign(error, details);
   return error;
 }
 
@@ -46,6 +49,12 @@ function unixToIso(value) {
   const numeric = Number(value || 0);
   if (!numeric) return null;
   return new Date(numeric * 1000).toISOString();
+}
+
+function timestampToIso(value) {
+  const timestamp = Number(value || 0);
+  if (!timestamp) return null;
+  return new Date(timestamp).toISOString();
 }
 
 async function postJson(url, body) {
@@ -264,6 +273,45 @@ function buildDigitalActivationPayload(record, schoolId) {
     issued_at: Math.floor(new Date(activatedAtIso).getTime() / 1000),
     expires_at: Math.floor(new Date(expiresAtIso).getTime() / 1000),
   };
+}
+
+function getPendingVerificationDeadline(record) {
+  const createdAtMs = new Date(record?.created_at || 0).getTime();
+  if (!createdAtMs) return 0;
+  return createdAtMs + PENDING_VERIFICATION_WINDOW_MS;
+}
+
+function readEmailErrorFromMetadata(record) {
+  const metadata = parseMetadata(record?.metadata);
+  return String(metadata?.email_result?.error || '').trim() || null;
+}
+
+function findLatestDigitalLedgerRecordBySchool(schoolId, statuses = ['pending', 'pending_activation']) {
+  const placeholders = statuses.map(() => '?').join(', ');
+  return db.prepare(`
+    SELECT *
+    FROM subscription_records
+    WHERE school_id = ?
+      AND plan_kind = 'digital_online'
+      AND status IN (${placeholders})
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(schoolId, ...statuses);
+}
+
+function markLedgerRecordFailed(record, reason) {
+  const metadata = {
+    ...parseMetadata(record?.metadata),
+    failure_reason: reason,
+    failed_at: new Date().toISOString(),
+  };
+  db.prepare(`
+    UPDATE subscription_records
+    SET status = 'failed',
+        metadata = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(JSON.stringify(metadata), record.id);
 }
 
 function insertSubscriptionRecord({
@@ -512,9 +560,38 @@ router.post('/digital/initialize', async (req, res) => {
     const result = await runWithSchoolContext(schoolId, async () => {
       syncSchoolInfo({ schoolId, country, schoolName, schoolEmail });
 
+      const latestLedgerRecord = findLatestDigitalLedgerRecordBySchool(schoolId);
+      if (latestLedgerRecord?.status === 'pending_activation') {
+        throw createHttpError(
+          'A payment for this School ID has already been verified. Use the activation code sent to your email to finish setup.',
+          409,
+          {
+            charge_id: latestLedgerRecord.charge_id || null,
+            pending_expires_at: null,
+            verification_window_minutes: PENDING_VERIFICATION_WINDOW_MINUTES,
+          }
+        );
+      }
+      if (latestLedgerRecord?.status === 'pending') {
+        const pendingExpiresAt = getPendingVerificationDeadline(latestLedgerRecord);
+        if (pendingExpiresAt > Date.now()) {
+          throw createHttpError(
+            `A payment request for this School ID is already pending verification until ${new Date(pendingExpiresAt).toLocaleString()}. Complete payment and verify it before starting another request.`,
+            409,
+            {
+              charge_id: latestLedgerRecord.charge_id || null,
+              pending_expires_at: timestampToIso(pendingExpiresAt),
+              verification_window_minutes: PENDING_VERIFICATION_WINDOW_MINUTES,
+            }
+          );
+        }
+        markLedgerRecordFailed(latestLedgerRecord, 'verification_window_expired');
+      }
+
       const chargeId = `sub_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
       // Temporary test override: charge MWK 50 in PayChangu for Malawi subscriptions.
       const chargeAmount = plan.currency === 'MWK' ? MALAWI_TEST_PAYCHANGU_AMOUNT : plan.amount;
+      const pendingExpiresAt = Date.now() + PENDING_VERIFICATION_WINDOW_MS;
       let providerResponse;
 
       if (methodMeta.channel === 'mobile_money') {
@@ -574,6 +651,8 @@ router.post('/digital/initialize', async (req, res) => {
         internalUid,
         metadata: {
           provider: providerResponse,
+          pending_expires_at: timestampToIso(pendingExpiresAt),
+          verification_window_minutes: PENDING_VERIFICATION_WINDOW_MINUTES,
         },
       });
 
@@ -585,6 +664,9 @@ router.post('/digital/initialize', async (req, res) => {
         amount: chargeAmount,
         currency: plan.currency,
         duration_days: plan.durationDays,
+        pending_expires_at: timestampToIso(pendingExpiresAt),
+        verification_window_minutes: PENDING_VERIFICATION_WINDOW_MINUTES,
+        message: `Payment request created. Complete payment and verify it within ${PENDING_VERIFICATION_WINDOW_MINUTES} minutes.`,
       };
     }, { allowCreate: true });
 
@@ -599,26 +681,43 @@ router.post('/digital/initialize', async (req, res) => {
 router.post('/digital/verify-payment', async (req, res) => {
   try {
     const schoolId = normalizeSchoolId(req.body?.school_id);
-    const chargeId = String(req.body?.charge_id || '').trim();
-    if (!schoolId || !chargeId) {
-      return res.status(400).json({ error: 'school_id and charge_id are required.' });
+    if (!schoolId) {
+      return res.status(400).json({ error: 'school_id is required.' });
     }
 
     const result = await runWithSchoolContext(schoolId, async () => {
-      const record = db.prepare(`
-        SELECT *
-        FROM subscription_records
-        WHERE charge_id = ?
-        ORDER BY created_at DESC
-        LIMIT 1
-      `).get(chargeId);
+      const record = findLatestDigitalLedgerRecordBySchool(schoolId);
       if (!record) {
-        throw createHttpError('Subscription payment was not found.', 404);
+        throw createHttpError('No pending payment request was found for this School ID.', 404);
       }
-      if (record.status === 'active') {
-        throw createHttpError('This digital subscription has already been activated.', 409);
+      if (record.status === 'pending_activation') {
+        return {
+          status: 'pending_activation',
+          charge_id: record.charge_id || null,
+          email_sent: Boolean(String(record.activation_code || '').trim()),
+          email_error: readEmailErrorFromMetadata(record),
+          pending_expires_at: null,
+        };
+      }
+      if (record.status !== 'pending') {
+        throw createHttpError('No payment request is awaiting verification for this School ID.', 409);
       }
 
+      const pendingExpiresAt = getPendingVerificationDeadline(record);
+      if (!pendingExpiresAt || pendingExpiresAt <= Date.now()) {
+        markLedgerRecordFailed(record, 'verification_window_expired');
+        throw createHttpError(
+          `This payment request expired after ${PENDING_VERIFICATION_WINDOW_MINUTES} minutes. Start a new payment request.`,
+          410,
+          {
+            charge_id: record.charge_id || null,
+            pending_expires_at: timestampToIso(pendingExpiresAt),
+            verification_window_minutes: PENDING_VERIFICATION_WINDOW_MINUTES,
+          }
+        );
+      }
+
+      const chargeId = String(record.charge_id || '').trim();
       const verification = record.payment_channel === 'card'
         ? await paychanguRequest(`/charge-card/verify/${chargeId}`)
         : await paychanguRequest(`/mobile-money/payments/${chargeId}/verify`);
@@ -665,6 +764,7 @@ router.post('/digital/verify-payment', async (req, res) => {
         charge_id: chargeId,
         email_sent: emailResult.ok,
         email_error: emailResult.ok ? null : emailResult.error,
+        pending_expires_at: null,
       };
     }, { allowCreate: true });
 
