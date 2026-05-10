@@ -29,6 +29,9 @@ const SMTP_SECURE = String(process.env.SMTP_SECURE || '').trim().toLowerCase() =
 const SMTP_USER = String(process.env.SMTP_USER || '').trim();
 const SMTP_PASS = String(process.env.SMTP_PASS || '').trim();
 const SMTP_FROM = String(process.env.SMTP_FROM || SMTP_USER || 'no-reply@oasis-ems.local').trim();
+const PAYMENT_LOG_INCLUDE_FULL_ACTIVATION_CODES = String(
+  process.env.PAYMENT_LOG_INCLUDE_FULL_ACTIVATION_CODES || 'false'
+).trim().toLowerCase() === 'true';
 const MALAWI_TEST_PAYCHANGU_AMOUNT = 50;
 const PENDING_VERIFICATION_WINDOW_MS = 5 * 60 * 1000;
 const PENDING_VERIFICATION_WINDOW_MINUTES = 5;
@@ -111,6 +114,13 @@ function sanitizePaymentLogValue(value, key = '') {
 
   if (normalizedKey === 'email' || normalizedKey === 'school_email') {
     return maskEmail(value);
+  }
+
+  if (
+    PAYMENT_LOG_INCLUDE_FULL_ACTIVATION_CODES &&
+    (normalizedKey === 'activation_code' || normalizedKey === 'activation_key')
+  ) {
+    return String(value);
   }
 
   if (normalizedKey === 'card_number') {
