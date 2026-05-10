@@ -535,6 +535,11 @@ function readEmailErrorFromMetadata(record) {
   return String(metadata?.email_result?.error || '').trim() || null;
 }
 
+function readEmailSentFromMetadata(record) {
+  const metadata = parseMetadata(record?.metadata);
+  return metadata?.email_result?.ok === true;
+}
+
 function findLatestDigitalLedgerRecordBySchool(schoolId, statuses = ['pending', 'pending_activation']) {
   const placeholders = statuses.map(() => '?').join(', ');
   return db.prepare(`
@@ -1059,7 +1064,7 @@ router.post('/digital/verify-payment', async (req, res) => {
         return {
           status: 'pending_activation',
           charge_id: record.charge_id || null,
-          email_sent: Boolean(String(record.activation_code || '').trim()),
+          email_sent: readEmailSentFromMetadata(record),
           email_error: readEmailErrorFromMetadata(record),
           pending_expires_at: null,
         };
@@ -1118,8 +1123,16 @@ router.post('/digital/verify-payment', async (req, res) => {
           schoolId,
         });
       } catch (error) {
+        logPaymentError('payment.email.failed', error, {
+          ...paymentLogContext,
+          school_id: schoolId,
+          email: String(record.admin_email || '').trim(),
+          activation_code: activationCode,
+        });
         emailResult = { ok: false, error: error.message || 'Failed to send activation email.' };
       }
+
+      metadata.email_result = emailResult;
 
       db.prepare(`
         UPDATE subscription_records
