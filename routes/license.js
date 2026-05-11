@@ -8,8 +8,9 @@ import {
   TRIAL_DURATION_DAYS,
   calculateExpiryUnix,
   getDigitalMethodMeta,
-  getDigitalSubscriptionPlan,
+  getFallbackDigitalSubscriptionCatalog,
   isDigitalMethodAllowed,
+  normalizeRemoteDigitalPlans,
   normalizeSubscriptionCountry,
   splitFullName,
 } from '../shared/subscriptions.js';
@@ -19,6 +20,12 @@ const router = express.Router();
 const LICENSE_SERVER_URL = String(
   process.env.OASIS_LICENSE_SERVER_URL || ''
 ).trim().replace(/\/+$/, '');
+const PLANS_SERVER_URL = String(
+  process.env.OASIS_PUBLIC_URL_SERVER ||
+  process.env.OASIS_LEGACY_LICENSE_SERVER_URL ||
+  'https://ems-license-server.vercel.app'
+).trim().replace(/\/+$/, '');
+const PLANS_FETCH_TIMEOUT_MS = Number(process.env.OASIS_PLANS_FETCH_TIMEOUT_MS || 6000);
 const PAYCHANGU_BASE_URL = String(process.env.PAYCHANGU_BASE_URL || 'https://api.paychangu.com').trim().replace(/\/+$/, '');
 const PAYCHANGU_SECRET_KEY = String(
   process.env.PAYCHANGU_SECRET_KEY || process.env.PAYCHANGU_API_KEY || ''
@@ -246,6 +253,57 @@ async function postJson(url, body) {
     throw new Error(data?.error || `Request failed (${response.status})`);
   }
   return data;
+}
+
+function toLegacyDigitalPlan(plan, catalog) {
+  if (!plan || !catalog) return null;
+  return {
+    country: catalog.country,
+    amount: Number(plan.amount || 0),
+    currency: String(plan.currency || catalog.currency || '').trim() || null,
+    durationDays: Number(plan.duration_days || 0),
+    methods: Array.isArray(catalog.methods) ? catalog.methods : [],
+  };
+}
+
+function findCatalogPlan(catalog, requestedPlanId) {
+  const plans = Array.isArray(catalog?.plans) ? catalog.plans : [];
+  if (!plans.length) return null;
+  const normalizedPlanId = String(requestedPlanId || '').trim().toLowerCase();
+  if (!normalizedPlanId) {
+    return plans[0];
+  }
+  return plans.find((entry) => String(entry?.id || '').trim().toLowerCase() === normalizedPlanId) || null;
+}
+
+async function fetchDigitalPlansCatalog(country, logContext = {}) {
+  const normalizedCountry = normalizeSubscriptionCountry(country);
+  const fallback = getFallbackDigitalSubscriptionCatalog(normalizedCountry);
+  if (!PLANS_SERVER_URL) {
+    return fallback;
+  }
+
+  try {
+    const response = await fetch(`${PLANS_SERVER_URL}/plans`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(PLANS_FETCH_TIMEOUT_MS),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw createHttpError(
+        payload?.error || `Failed to load plans (${response.status}).`,
+        response.status
+      );
+    }
+    return normalizeRemoteDigitalPlans(normalizedCountry, payload);
+  } catch (error) {
+    logPaymentError('digital.plans.fetch_failed', error, {
+      ...logContext,
+      country: normalizedCountry,
+      plans_server_url: PLANS_SERVER_URL,
+    });
+    return fallback;
+  }
 }
 
 function assertLegacyLicenseServerConfigured() {
@@ -512,11 +570,13 @@ function buildDigitalActivationPayload(record, schoolId) {
   const expiresAtIso = record?.expires_at || new Date(calculateExpiryUnix(
     Number(record?.duration_days || DIGITAL_SUBSCRIPTION_DURATION_DAYS)
   ) * 1000).toISOString();
+  const metadata = parseMetadata(record?.metadata);
+  const label = String(record?.label || metadata?.plan_name || 'Digital Subscription').trim() || 'Digital Subscription';
 
   return {
     issuer: 'oasis-cloud-digital',
     code: String(record?.activation_code || '').trim(),
-    label: 'Digital Subscription',
+    label,
     school_id: normalizeSchoolId(schoolId || record?.school_id) || null,
     duration_days: Number(record?.duration_days || DIGITAL_SUBSCRIPTION_DURATION_DAYS),
     issued_at: Math.floor(new Date(activatedAtIso).getTime() / 1000),
@@ -797,7 +857,6 @@ router.post('/digital/initialize', async (req, res) => {
 
     const country = normalizeSubscriptionCountry(req.body?.country);
     const internalUid = String(req.body?.internal_uid || '').trim();
-    const plan = getDigitalSubscriptionPlan(country);
     const paymentMethod = String(req.body?.payment_method || '').trim().toLowerCase();
     const methodMeta = getDigitalMethodMeta(country, paymentMethod);
     const baseLogContext = {
@@ -828,6 +887,11 @@ router.post('/digital/initialize', async (req, res) => {
 
     const result = await runWithSchoolContext(schoolId, async () => {
       syncSchoolInfo({ schoolId, country, schoolName, schoolEmail });
+      const digitalPlans = await fetchDigitalPlansCatalog(country, baseLogContext);
+      const selectedPlan = findCatalogPlan(digitalPlans, req.body?.plan_id);
+      if (!selectedPlan) {
+        throw createHttpError('Select a valid digital subscription plan.', 400);
+      }
 
       const latestLedgerRecord = findLatestDigitalLedgerRecordBySchool(schoolId);
       logPaymentEvent('digital.initialize.latest_ledger_record', {
@@ -871,15 +935,17 @@ router.post('/digital/initialize', async (req, res) => {
 
       const chargeId = `sub_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
       // Temporary test override: charge MWK 50 in PayChangu for Malawi subscriptions.
-      const chargeAmount = plan.currency === 'MWK' ? MALAWI_TEST_PAYCHANGU_AMOUNT : plan.amount;
+      const chargeAmount = selectedPlan.currency === 'MWK' ? MALAWI_TEST_PAYCHANGU_AMOUNT : selectedPlan.amount;
       const pendingExpiresAt = Date.now() + PENDING_VERIFICATION_WINDOW_MS;
       let providerResponse;
       const paymentLogContext = {
         ...baseLogContext,
         charge_id: chargeId,
         amount: chargeAmount,
-        currency: plan.currency,
-        duration_days: plan.durationDays,
+        currency: selectedPlan.currency,
+        duration_days: selectedPlan.duration_days,
+        plan_id: selectedPlan.id,
+        plan_name: selectedPlan.name,
       };
 
       logPaymentEvent('digital.initialize.preparing_provider_request', {
@@ -921,7 +987,7 @@ router.post('/digital/initialize', async (req, res) => {
             expiry_month: String(req.body?.expiry_month || '').trim(),
             expiry_year: String(req.body?.expiry_year || '').trim(),
             amount: chargeAmount,
-            currency: plan.currency,
+            currency: selectedPlan.currency,
             email: adminEmail,
             charge_id: chargeId,
           },
@@ -956,15 +1022,22 @@ router.post('/digital/initialize', async (req, res) => {
         adminName,
         planKind: 'digital_online',
         status: 'pending',
+        activationCode: null,
         chargeId,
         paymentMethod,
         paymentChannel: methodMeta.channel,
+        label: selectedPlan.name,
         amount: chargeAmount,
-        currency: plan.currency,
-        durationDays: plan.durationDays,
+        currency: selectedPlan.currency,
+        durationDays: selectedPlan.duration_days,
         onlineFeaturesEnabled: true,
         internalUid,
         metadata: {
+          plan_id: selectedPlan.id,
+          plan_name: selectedPlan.name,
+          plan_duration_months: selectedPlan.duration_months,
+          selected_plan: selectedPlan,
+          catalog_source: digitalPlans.source || 'fallback',
           provider: providerResponse,
           provider_mode: providerMode,
           provider_status: providerStatus,
@@ -987,8 +1060,13 @@ router.post('/digital/initialize', async (req, res) => {
         payment_method: paymentMethod,
         payment_channel: methodMeta.channel,
         amount: chargeAmount,
-        currency: plan.currency,
-        duration_days: plan.durationDays,
+        currency: selectedPlan.currency,
+        duration_days: selectedPlan.duration_days,
+        plan_id: selectedPlan.id,
+        plan_name: selectedPlan.name,
+        selected_plan: selectedPlan,
+        digital_plan: toLegacyDigitalPlan(selectedPlan, digitalPlans),
+        digital_plans: digitalPlans,
         pending_expires_at: timestampToIso(pendingExpiresAt),
         verification_window_minutes: PENDING_VERIFICATION_WINDOW_MINUTES,
         message: `Payment request created. Complete payment and verify it within ${PENDING_VERIFICATION_WINDOW_MINUTES} minutes.`,
@@ -1013,6 +1091,9 @@ router.post('/digital/initialize', async (req, res) => {
     });
     return res.status(Number(error?.statusCode || error?.status || 500)).json({
       error: error.message || 'Failed to initialize digital payment.',
+      charge_id: error?.charge_id || null,
+      pending_expires_at: error?.pending_expires_at || null,
+      verification_window_minutes: error?.verification_window_minutes || null,
     });
   }
 });
@@ -1112,6 +1193,7 @@ router.post('/digital/verify-payment', async (req, res) => {
         ...parseMetadata(record.metadata),
         verification,
       };
+      const planLabel = String(metadata?.plan_name || 'Digital Subscription').trim() || 'Digital Subscription';
 
       let emailResult = { ok: false, error: 'SMTP is not configured on the cloud server.' };
       try {
@@ -1119,7 +1201,7 @@ router.post('/digital/verify-payment', async (req, res) => {
           email: String(record.admin_email || '').trim(),
           code: activationCode,
           durationDays: Number(record.duration_days || DIGITAL_SUBSCRIPTION_DURATION_DAYS),
-          label: 'Digital Subscription',
+          label: planLabel,
           schoolId,
         });
       } catch (error) {
@@ -1177,6 +1259,9 @@ router.post('/digital/verify-payment', async (req, res) => {
     });
     return res.status(Number(error?.statusCode || error?.status || 500)).json({
       error: error.message || 'Failed to verify payment.',
+      charge_id: error?.charge_id || null,
+      pending_expires_at: error?.pending_expires_at || null,
+      verification_window_minutes: error?.verification_window_minutes || null,
     });
   }
 });
@@ -1241,6 +1326,7 @@ router.post('/digital/activate', async (req, res) => {
           throw createHttpError('Activation code has already been used on another device.', 409);
         }
         const activation = buildDigitalActivationPayload(record, schoolId);
+        const metadata = parseMetadata(record.metadata);
         logPaymentEvent('digital.activate.already_active', {
           ...paymentLogContext,
           activation_payload: activation,
@@ -1254,6 +1340,7 @@ router.post('/digital/activate', async (req, res) => {
           currency: record.currency || null,
           email: record.admin_email || null,
           full_name: record.admin_name || null,
+          plan_id: String(metadata?.plan_id || '').trim() || null,
         };
       }
 
@@ -1313,6 +1400,7 @@ router.post('/digital/activate', async (req, res) => {
         currency: latest?.currency || null,
         email: latest?.admin_email || null,
         full_name: latest?.admin_name || null,
+        plan_id: String(metadata?.plan_id || '').trim() || null,
       };
     }, { allowCreate: true });
 
