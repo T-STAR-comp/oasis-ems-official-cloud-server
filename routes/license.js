@@ -39,7 +39,7 @@ const SMTP_FROM = String(process.env.SMTP_FROM || SMTP_USER || 'no-reply@oasis-e
 const PAYMENT_LOG_INCLUDE_FULL_ACTIVATION_CODES = String(
   process.env.PAYMENT_LOG_INCLUDE_FULL_ACTIVATION_CODES || 'false'
 ).trim().toLowerCase() === 'true';
-const MALAWI_TEST_PAYCHANGU_AMOUNT = 50;
+const PAYCHANGU_MALAWI_TEST_AMOUNT = Number(process.env.PAYCHANGU_MALAWI_TEST_AMOUNT || 50);
 const PENDING_VERIFICATION_WINDOW_MS = 5 * 60 * 1000;
 const PENDING_VERIFICATION_WINDOW_MINUTES = 5;
 const PAYMENT_LOG_PREFIX = '[payment-flow]';
@@ -934,8 +934,10 @@ router.post('/digital/initialize', async (req, res) => {
       }
 
       const chargeId = `sub_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-      // Temporary test override: charge MWK 50 in PayChangu for Malawi subscriptions.
-      const chargeAmount = selectedPlan.currency === 'MWK' ? MALAWI_TEST_PAYCHANGU_AMOUNT : selectedPlan.amount;
+      // Allow sandbox deployments to override Malawi plan pricing without changing the live catalog.
+      const chargeAmount = selectedPlan.currency === 'MWK' && Number.isFinite(PAYCHANGU_MALAWI_TEST_AMOUNT) && PAYCHANGU_MALAWI_TEST_AMOUNT > 0
+        ? PAYCHANGU_MALAWI_TEST_AMOUNT
+        : selectedPlan.amount;
       const pendingExpiresAt = Date.now() + PENDING_VERIFICATION_WINDOW_MS;
       let providerResponse;
       const paymentLogContext = {
