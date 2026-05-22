@@ -154,12 +154,13 @@ function getFormTeacherName(classId) {
 function isEnglishSubject(row) {
   const code = String(row?.subject_code || '').trim().toUpperCase();
   const name = String(row?.subject_name || '').trim().toLowerCase();
-  return code === 'ENG' || name === 'english';
+  return code === 'ENG' || code === 'ENGLISH' || name === 'english' || name === 'english language';
 }
 
 function isPassingRow(row, gradingSystem) {
   if (!row) return false;
-  if (gradingSystem === 'msce') {
+  const rowSystem = row.grading_system || gradingSystem;
+  if (rowSystem === 'msce') {
     const points = Number(row.points);
     return Number.isFinite(points) ? points <= 7 : false;
   }
@@ -479,12 +480,13 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
 
   const componentWeight = Number(exam.component_weight || 0);
   const currentWeight = Number(exam.current_weight || 100);
-  const hasComponent = componentWeight > 0 && Boolean(exam.component_exam_name);
   const isMidterm = String(exam.type || '').toLowerCase() === 'midterm';
   const useEndTermComposite = String(exam.type || '').toLowerCase() === 'endterm' && String(exam.component_exam_type || '').toLowerCase() === 'midterm';
+  const hasComponent = Boolean(exam.component_exam_name) && (componentWeight > 0 || useEndTermComposite);
   const componentLabel = exam.component_exam_name || 'CAT';
   const currentLabel = exam.name || 'Current Exam';
   const componentExamMax = Math.max(0, Number(exam.component_exam_max_score || 0));
+  const weightedComponentExamMax = Math.max(1, Number(exam.component_exam_max_score || 100));
   const remainingToHundred = Math.max(0, 100 - componentExamMax);
   const currentExamMax = Math.max(1, Number(exam.max_score || 100));
   const caPercentLabel = useEndTermComposite ? componentExamMax : componentWeight;
@@ -545,10 +547,10 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
     const remarkDisplay = result.remark || gradeInfo.remark || '';
     const caValue = useEndTermComposite
       ? Number(result.component_score || 0).toFixed(1)
-      : ((Number(result.component_score || 0) * componentWeight) / 100).toFixed(1);
+      : ((Number(result.component_score || 0) / weightedComponentExamMax) * componentWeight).toFixed(1);
     const currentValue = useEndTermComposite
       ? ((Number(result.current_score || 0) / currentExamMax) * remainingToHundred).toFixed(1)
-      : ((Number(result.current_score || result.score) * currentWeight) / 100).toFixed(1);
+      : ((Number(result.current_score ?? result.score) / currentExamMax) * currentWeight).toFixed(1);
 
     const values = hasComponent
       ? [
@@ -697,12 +699,13 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
 
   const componentWeight = Number(exam.component_weight || 0);
   const currentWeight = Number(exam.current_weight || 100);
-  const hasComponent = componentWeight > 0 && Boolean(exam.component_exam_name);
   const isMidterm = String(exam.type || '').toLowerCase() === 'midterm';
   const useEndTermComposite = String(exam.type || '').toLowerCase() === 'endterm' && String(exam.component_exam_type || '').toLowerCase() === 'midterm';
+  const hasComponent = Boolean(exam.component_exam_name) && (componentWeight > 0 || useEndTermComposite);
   const componentLabel = exam.component_exam_name || 'CAT';
   const currentLabel = exam.name || 'Current Exam';
   const componentExamMax = Math.max(0, Number(exam.component_exam_max_score || 0));
+  const weightedComponentExamMax = Math.max(1, Number(exam.component_exam_max_score || 100));
   const remainingToHundred = Math.max(0, 100 - componentExamMax);
   const currentExamMax = Math.max(1, Number(exam.max_score || 100));
   const caPercentLabel = useEndTermComposite ? componentExamMax : componentWeight;
@@ -866,10 +869,10 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
       const remarkDisplay = result.remark || gradeInfo.remark || '';
       const caValue = useEndTermComposite
         ? Number(result.component_score || 0).toFixed(1)
-        : ((Number(result.component_score || 0) * componentWeight) / 100).toFixed(1);
+        : ((Number(result.component_score || 0) / weightedComponentExamMax) * componentWeight).toFixed(1);
       const currentValue = useEndTermComposite
         ? ((Number(result.current_score || 0) / currentExamMax) * remainingToHundred).toFixed(1)
-        : ((Number(result.current_score || result.score) * currentWeight) / 100).toFixed(1);
+        : ((Number(result.current_score ?? result.score) / currentExamMax) * currentWeight).toFixed(1);
       const values = hasComponent
         ? [
             result.subject_name,

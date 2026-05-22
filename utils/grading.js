@@ -92,7 +92,7 @@ function hasPointBasedResults(results = []) {
 function isEnglishSubject(row) {
   const code = String(row?.subject_code || '').trim().toUpperCase();
   const name = String(row?.subject_name || '').trim().toLowerCase();
-  return code === 'ENG' || name === 'english';
+  return code === 'ENG' || code === 'ENGLISH' || name === 'english' || name === 'english language';
 }
 
 function calculateBestSixPoints(results = []) {
@@ -157,6 +157,8 @@ export function calculateStudentResults(examId, studentId) {
 
   const currentWeight = Number(exam.current_weight ?? 100);
   const componentWeight = Number(exam.component_weight ?? 0);
+  const componentExamMax = Math.max(1, Number(componentExam?.max_score || 100));
+  const currentExamMax = Math.max(1, Number(exam.max_score || 100));
   const currentBySubject = new Map(currentRows.map((row) => [row.subject_id, row]));
   const componentBySubject = new Map(componentRows.map((row) => [row.subject_id, row]));
   const subjectIds = new Set([...currentBySubject.keys(), ...componentBySubject.keys()]);
@@ -176,13 +178,11 @@ export function calculateStudentResults(examId, studentId) {
       componentExam.type === 'midterm';
     let finalScore;
     if (useEndTermComposite) {
-      const componentExamMax = Math.max(0, Number(componentExam.max_score || 0));
-      const currentExamMax = Math.max(1, Number(exam.max_score || 100));
-      const remaining = Math.max(0, 100 - componentExamMax);
+      const remaining = Math.max(0, 100 - Number(componentExam?.max_score || 0));
       const convertedCurrent = (currentScore / currentExamMax) * remaining;
       finalScore = Number((componentScore + convertedCurrent).toFixed(2));
     } else {
-      finalScore = Number(((componentScore * componentWeight) / 100 + (currentScore * currentWeight) / 100).toFixed(2));
+      finalScore = Number((((componentScore / componentExamMax) * componentWeight) + ((currentScore / currentExamMax) * currentWeight)).toFixed(2));
     }
     const subjectGrading = resolveSubjectGrading(profileMap, subjectId, exam.grading_system);
     const gradeInfo = getGrade(finalScore, subjectGrading.gradingSystem, subjectGrading.customCriteria);

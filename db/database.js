@@ -6,6 +6,12 @@ import fs from 'fs';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import {
+  MysqlCompatConnection,
+  ensureMysqlDatabase,
+  isMysqlEnabled,
+  resolveMysqlDatabaseName,
+} from './mysqlAdapter.js';
+import {
   DEFAULT_COUNTRY,
   normalizeCountry,
   ALL_GRADING_SYSTEMS,
@@ -67,6 +73,7 @@ const tenantContext = new AsyncLocalStorage();
 const tenantConnections = new Map();
 const initializedTenants = new Set();
 const initializingTenants = new Set();
+const USE_MYSQL = isMysqlEnabled();
 
 function getContextStore() {
   return tenantContext.getStore() || null;
@@ -102,6 +109,11 @@ function resolveRequestSchoolId(req) {
 }
 
 function createConnection(dbPath) {
+  if (USE_MYSQL) {
+    ensureMysqlDatabase(dbPath);
+    return new MysqlCompatConnection(dbPath);
+  }
+
   const connection = new Database(dbPath);
   connection.pragma('journal_mode = WAL');
   connection.pragma('foreign_keys = ON');
@@ -152,11 +164,13 @@ function getTenantConnection(schoolId, { allowCreate = false } = {}) {
     throw createTenantError('School ID is required for cloud access.', 400);
   }
 
-  const dbPath = resolveTenantDatabasePath(normalizedSchoolId);
-  if (!fs.existsSync(dbPath)) {
+  const dbPath = USE_MYSQL
+    ? resolveMysqlDatabaseName(normalizedSchoolId)
+    : resolveTenantDatabasePath(normalizedSchoolId);
+  if (!USE_MYSQL && !fs.existsSync(dbPath)) {
     migrateLegacyDatabaseIfNeeded(normalizedSchoolId, dbPath);
   }
-  if (!fs.existsSync(dbPath) && !allowCreate) {
+  if (!USE_MYSQL && !fs.existsSync(dbPath) && !allowCreate) {
     throw createTenantError('School was not found in cloud storage. Verify the School ID or migrate the school first.', 404);
   }
 
