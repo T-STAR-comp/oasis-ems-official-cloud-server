@@ -262,6 +262,8 @@ function toLegacyDigitalPlan(plan, catalog) {
     amount: Number(plan.amount || 0),
     currency: String(plan.currency || catalog.currency || '').trim() || null,
     durationDays: Number(plan.duration_days || 0),
+    accessMode: String(plan.access_mode || 'online').trim().toLowerCase() === 'offline' ? 'offline' : 'online',
+    onlineFeaturesEnabled: plan.online_features_enabled !== false,
     methods: Array.isArray(catalog.methods) ? catalog.methods : [],
   };
 }
@@ -389,7 +391,7 @@ function getMailTransport() {
   });
 }
 
-async function sendActivationEmail({ email, code, durationDays, label, schoolId }) {
+async function sendActivationEmail({ email, code, durationDays, label, schoolId, onlineFeaturesEnabled = true }) {
   const transporter = getMailTransport();
   if (!transporter) {
     logPaymentEvent('payment.email.skipped', {
@@ -402,13 +404,13 @@ async function sendActivationEmail({ email, code, durationDays, label, schoolId 
     return { ok: false, error: 'SMTP is not configured on the cloud server.' };
   }
 
-  const subject = 'Oasis EMS Digital Subscription Activation Code';
+  const subject = 'Oasis EMS Subscription Activation Code';
   const lines = [
     'Hello,',
     '',
     'Your Oasis EMS payment was verified successfully.',
     '',
-    'Use this activation code to finish your digital subscription setup:',
+    'Use this activation code to finish your subscription setup:',
     '',
     code,
     '',
@@ -418,7 +420,15 @@ async function sendActivationEmail({ email, code, durationDays, label, schoolId 
   if (label) {
     lines.push(`Plan: ${label}`);
   }
-  lines.push('', 'Enter this code in Oasis EMS to activate online access.', '', 'Regards,', 'Oasis EMS Team');
+  lines.push(
+    '',
+    onlineFeaturesEnabled
+      ? 'Enter this code in Oasis EMS to activate online access.'
+      : 'Enter this code in Oasis EMS to activate the offline version.',
+    '',
+    'Regards,',
+    'Oasis EMS Team'
+  );
 
   logPaymentEvent('payment.email.start', {
     school_id: schoolId,
@@ -581,6 +591,8 @@ function buildDigitalActivationPayload(record, schoolId) {
     duration_days: Number(record?.duration_days || DIGITAL_SUBSCRIPTION_DURATION_DAYS),
     issued_at: Math.floor(new Date(activatedAtIso).getTime() / 1000),
     expires_at: Math.floor(new Date(expiresAtIso).getTime() / 1000),
+    plan_kind: record?.plan_kind || 'digital_online',
+    online_features_enabled: Number(record?.online_features_enabled || 0) === 1,
   };
 }
 
@@ -600,13 +612,13 @@ function readEmailSentFromMetadata(record) {
   return metadata?.email_result?.ok === true;
 }
 
-function findLatestDigitalLedgerRecordBySchool(schoolId, statuses = ['pending', 'pending_activation']) {
+function findLatestPaidLedgerRecordBySchool(schoolId, statuses = ['pending', 'pending_activation']) {
   const placeholders = statuses.map(() => '?').join(', ');
   return db.prepare(`
     SELECT *
     FROM subscription_records
     WHERE school_id = ?
-      AND plan_kind = 'digital_online'
+      AND plan_kind IN ('digital_online', 'manual_offline')
       AND status IN (${placeholders})
     ORDER BY created_at DESC
     LIMIT 1
@@ -682,6 +694,24 @@ function insertSubscriptionRecord({
   );
   return id;
 }
+
+router.get('/plans', async (req, res) => {
+  try {
+    const country = normalizeSubscriptionCountry(req.query?.country || req.body?.country);
+    const plans = await fetchDigitalPlansCatalog(country, {
+      route: 'plans',
+      country,
+    });
+    return res.json({
+      ...plans,
+      source: plans.source === 'remote' ? 'remote' : 'cloud',
+    });
+  } catch (error) {
+    return res.status(Number(error?.statusCode || error?.status || 500)).json({
+      error: error.message || 'Failed to load subscription plans.',
+    });
+  }
+});
 
 router.post('/trial/activate', async (req, res) => {
   try {
@@ -893,7 +923,7 @@ router.post('/digital/initialize', async (req, res) => {
         throw createHttpError('Select a valid digital subscription plan.', 400);
       }
 
-      const latestLedgerRecord = findLatestDigitalLedgerRecordBySchool(schoolId);
+      const latestLedgerRecord = findLatestPaidLedgerRecordBySchool(schoolId);
       logPaymentEvent('digital.initialize.latest_ledger_record', {
         ...baseLogContext,
         latest_record: latestLedgerRecord
@@ -934,6 +964,11 @@ router.post('/digital/initialize', async (req, res) => {
       }
 
       const chargeId = `sub_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      const planAccessMode = String(selectedPlan.access_mode || '').trim().toLowerCase() === 'offline'
+        ? 'offline'
+        : 'online';
+      const planKind = planAccessMode === 'offline' ? 'manual_offline' : 'digital_online';
+      const onlineFeaturesEnabled = planAccessMode === 'online';
       // Allow sandbox deployments to override Malawi plan pricing without changing the live catalog.
       const chargeAmount = selectedPlan.currency === 'MWK' && Number.isFinite(PAYCHANGU_MALAWI_TEST_AMOUNT) && PAYCHANGU_MALAWI_TEST_AMOUNT > 0
         ? PAYCHANGU_MALAWI_TEST_AMOUNT
@@ -948,6 +983,7 @@ router.post('/digital/initialize', async (req, res) => {
         duration_days: selectedPlan.duration_days,
         plan_id: selectedPlan.id,
         plan_name: selectedPlan.name,
+        plan_access_mode: planAccessMode,
       };
 
       logPaymentEvent('digital.initialize.preparing_provider_request', {
@@ -1022,7 +1058,7 @@ router.post('/digital/initialize', async (req, res) => {
         country,
         adminEmail,
         adminName,
-        planKind: 'digital_online',
+        planKind,
         status: 'pending',
         activationCode: null,
         chargeId,
@@ -1032,11 +1068,12 @@ router.post('/digital/initialize', async (req, res) => {
         amount: chargeAmount,
         currency: selectedPlan.currency,
         durationDays: selectedPlan.duration_days,
-        onlineFeaturesEnabled: true,
+        onlineFeaturesEnabled,
         internalUid,
         metadata: {
           plan_id: selectedPlan.id,
           plan_name: selectedPlan.name,
+          plan_access_mode: planAccessMode,
           plan_duration_months: selectedPlan.duration_months,
           selected_plan: selectedPlan,
           catalog_source: digitalPlans.source || 'fallback',
@@ -1064,6 +1101,8 @@ router.post('/digital/initialize', async (req, res) => {
         amount: chargeAmount,
         currency: selectedPlan.currency,
         duration_days: selectedPlan.duration_days,
+        plan_kind: planKind,
+        online_features_enabled: onlineFeaturesEnabled,
         plan_id: selectedPlan.id,
         plan_name: selectedPlan.name,
         selected_plan: selectedPlan,
@@ -1120,7 +1159,7 @@ router.post('/digital/verify-payment', async (req, res) => {
     });
 
     const result = await runWithSchoolContext(schoolId, async () => {
-      const record = findLatestDigitalLedgerRecordBySchool(schoolId);
+      const record = findLatestPaidLedgerRecordBySchool(schoolId);
       if (!record) {
         throw createHttpError('No pending payment request was found for this School ID.', 404);
       }
@@ -1205,6 +1244,7 @@ router.post('/digital/verify-payment', async (req, res) => {
           durationDays: Number(record.duration_days || DIGITAL_SUBSCRIPTION_DURATION_DAYS),
           label: planLabel,
           schoolId,
+          onlineFeaturesEnabled: Number(record.online_features_enabled || 0) === 1,
         });
       } catch (error) {
         logPaymentError('payment.email.failed', error, {

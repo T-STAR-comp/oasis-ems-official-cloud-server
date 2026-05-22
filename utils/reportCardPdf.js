@@ -416,8 +416,9 @@ export function renderStudentReportCardPage({
   const currentWeight = Number(exam.current_weight || 100);
   const useEndTermComposite = String(exam.type || '').toLowerCase() === 'endterm'
     && String(exam.component_exam_type || '').toLowerCase() === 'midterm';
-  const hasComponent = componentWeight > 0 && Boolean(exam.component_exam_name);
+  const hasComponent = Boolean(exam.component_exam_name) && (componentWeight > 0 || useEndTermComposite);
   const componentExamMax = Math.max(0, Number(exam.component_exam_max_score || 0));
+  const weightedComponentExamMax = Math.max(1, Number(exam.component_exam_max_score || 100));
   const remainingToHundred = Math.max(0, 100 - componentExamMax);
   const currentExamMax = Math.max(1, Number(exam.max_score || 100));
   const caPercentLabel = useEndTermComposite ? componentExamMax : componentWeight;
@@ -467,10 +468,10 @@ export function renderStudentReportCardPage({
       const subjectRank = subjectRankMaps.get(result.subject_id)?.get(studentId) || 0;
       const caValue = useEndTermComposite
         ? Number(result.component_score || 0).toFixed(1)
-        : ((Number(result.component_score || 0) * componentWeight) / 100).toFixed(1);
+        : ((Number(result.component_score || 0) / weightedComponentExamMax) * componentWeight).toFixed(1);
       const currentValue = useEndTermComposite
         ? ((Number(result.current_score || 0) / currentExamMax) * remainingToHundred).toFixed(1)
-        : ((Number(result.current_score || result.score) * currentWeight) / 100).toFixed(1);
+        : ((Number(result.current_score ?? result.score) / currentExamMax) * currentWeight).toFixed(1);
 
       return {
         subject: String(result.subject_name || ''),

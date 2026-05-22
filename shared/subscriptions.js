@@ -44,10 +44,16 @@ function buildNormalizedPlan({
   durationMonths,
   amount,
   currency,
+  accessMode = 'online',
 }) {
+  const normalizedAccessMode = String(accessMode || '').trim().toLowerCase() === 'offline'
+    ? 'offline'
+    : 'online';
   return {
     id: String(id || '').trim().toLowerCase(),
     name: String(name || '').trim(),
+    access_mode: normalizedAccessMode,
+    online_features_enabled: normalizedAccessMode === 'online',
     duration_months: Number(durationMonths || 0),
     duration_days: convertPlanMonthsToDays(durationMonths),
     amount: Number(amount || 0),
@@ -84,18 +90,36 @@ export function getFallbackDigitalSubscriptionCatalog(country) {
 
   const plans = [
     buildNormalizedPlan({
-      id: 'per-term',
-      name: 'Per Term',
+      id: 'online-per-term',
+      name: 'Online Per Term',
       durationMonths: 3,
-      amount: 320000,
+      amount: 350000,
       currency: 'MWK',
+      accessMode: 'online',
     }),
     buildNormalizedPlan({
-      id: 'yearly',
-      name: 'Yearly',
+      id: 'online-yearly',
+      name: 'Online Yearly',
       durationMonths: 12,
-      amount: 850000,
+      amount: 800000,
       currency: 'MWK',
+      accessMode: 'online',
+    }),
+    buildNormalizedPlan({
+      id: 'offline-per-term',
+      name: 'Offline Per Term',
+      durationMonths: 3,
+      amount: 270000,
+      currency: 'MWK',
+      accessMode: 'offline',
+    }),
+    buildNormalizedPlan({
+      id: 'offline-yearly',
+      name: 'Offline Yearly',
+      durationMonths: 12,
+      amount: 700000,
+      currency: 'MWK',
+      accessMode: 'offline',
     }),
   ];
 
@@ -132,6 +156,9 @@ export function normalizeRemoteDigitalPlans(country, payload) {
 
     const id = String(entry?.id || '').trim().toLowerCase() || `plan-${index + 1}`;
     const name = String(entry?.name || '').trim() || `Plan ${index + 1}`;
+    const accessMode = String(entry?.access_mode ?? entry?.accessMode ?? '').trim().toLowerCase() === 'offline'
+      ? 'offline'
+      : 'online';
 
     return buildNormalizedPlan({
       id,
@@ -139,6 +166,7 @@ export function normalizeRemoteDigitalPlans(country, payload) {
       durationMonths,
       amount,
       currency: inferredCurrency,
+      accessMode,
     });
   }).filter(Boolean);
 
