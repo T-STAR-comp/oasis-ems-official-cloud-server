@@ -374,6 +374,9 @@ async function paychanguRequest(endpoint, { method = 'GET', body, logContext = {
 }
 
 function parseMetadata(value) {
+  if (value && typeof value === 'object') {
+    return value;
+  }
   try {
     return value ? JSON.parse(value) : {};
   } catch (_error) {
