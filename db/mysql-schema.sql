@@ -1,5 +1,7 @@
-CREATE DATABASE IF NOT EXISTS oasis_ems CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE oasis_ems;
+-- Select the target database in phpMyAdmin before running this schema.
+-- If you are using a privileged MySQL client, create/select your database first:
+-- CREATE DATABASE IF NOT EXISTS oasis_ems CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+-- USE oasis_ems;
 
 CREATE TABLE IF NOT EXISTS app_identity (
   id INT PRIMARY KEY,
@@ -77,6 +79,9 @@ CREATE TABLE IF NOT EXISTS subscription_records (
   expires_at DATETIME,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_subscription_records_status (status),
+  KEY idx_subscription_records_plan (plan_kind),
+  KEY idx_subscription_records_charge_id (charge_id),
   CHECK (plan_kind IN ('trial', 'manual_offline', 'digital_online')),
   CHECK (status IN ('pending', 'pending_activation', 'active', 'expired', 'failed')),
   CHECK (online_features_enabled IN (0, 1))
@@ -97,6 +102,8 @@ CREATE TABLE IF NOT EXISTS user_class_assignments (
   class_id VARCHAR(64) NOT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (user_id, class_id),
+  KEY idx_user_class_assignments_user (user_id),
+  KEY idx_user_class_assignments_class (class_id),
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
   FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE
 );
@@ -112,6 +119,7 @@ CREATE TABLE IF NOT EXISTS students (
   admission_number TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_students_class (class_id),
   FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE,
   CHECK (gender IN ('Male', 'Female'))
 );
@@ -124,6 +132,8 @@ CREATE TABLE IF NOT EXISTS subjects (
   is_compulsory TINYINT NOT NULL DEFAULT 1,
   teacher_name TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_subjects_class (class_id),
+  KEY idx_subjects_compulsory (class_id, is_compulsory),
   FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE,
   CHECK (is_compulsory IN (0, 1))
 );
@@ -133,6 +143,8 @@ CREATE TABLE IF NOT EXISTS student_subjects (
   subject_id VARCHAR(64) NOT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (student_id, subject_id),
+  KEY idx_student_subjects_student (student_id),
+  KEY idx_student_subjects_subject (subject_id),
   FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
   FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
 );
@@ -154,6 +166,7 @@ CREATE TABLE IF NOT EXISTS exams (
   locked_by TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_exams_class (class_id),
   FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE,
   CHECK (type IN ('test', 'midterm', 'endterm'))
 );
@@ -168,6 +181,8 @@ CREATE TABLE IF NOT EXISTS exam_results (
   points INT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_results_exam (exam_id),
+  KEY idx_results_student (student_id),
   FOREIGN KEY (exam_id) REFERENCES exams(id) ON DELETE CASCADE,
   FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
   FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
@@ -192,6 +207,7 @@ CREATE TABLE IF NOT EXISTS exam_subject_grading_profiles (
   custom_criteria LONGTEXT,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (exam_id, subject_id),
+  KEY idx_exam_subject_profiles_exam (exam_id),
   FOREIGN KEY (exam_id) REFERENCES exams(id) ON DELETE CASCADE,
   FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
 );
@@ -201,22 +217,7 @@ CREATE TABLE IF NOT EXISTS exam_merge_sources (
   source_exam_id VARCHAR(64) NOT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (exam_id, source_exam_id),
+  KEY idx_exam_merge_sources_exam (exam_id),
   FOREIGN KEY (exam_id) REFERENCES exams(id) ON DELETE CASCADE,
   FOREIGN KEY (source_exam_id) REFERENCES exams(id) ON DELETE CASCADE
 );
-
-CREATE INDEX idx_students_class ON students(class_id);
-CREATE INDEX idx_subjects_class ON subjects(class_id);
-CREATE INDEX idx_user_class_assignments_user ON user_class_assignments(user_id);
-CREATE INDEX idx_user_class_assignments_class ON user_class_assignments(class_id);
-CREATE INDEX idx_subjects_compulsory ON subjects(class_id, is_compulsory);
-CREATE INDEX idx_student_subjects_student ON student_subjects(student_id);
-CREATE INDEX idx_student_subjects_subject ON student_subjects(subject_id);
-CREATE INDEX idx_exams_class ON exams(class_id);
-CREATE INDEX idx_results_exam ON exam_results(exam_id);
-CREATE INDEX idx_results_student ON exam_results(student_id);
-CREATE INDEX idx_exam_subject_profiles_exam ON exam_subject_grading_profiles(exam_id);
-CREATE INDEX idx_exam_merge_sources_exam ON exam_merge_sources(exam_id);
-CREATE INDEX idx_subscription_records_status ON subscription_records(status);
-CREATE INDEX idx_subscription_records_plan ON subscription_records(plan_kind);
-CREATE INDEX idx_subscription_records_charge_id ON subscription_records(charge_id);

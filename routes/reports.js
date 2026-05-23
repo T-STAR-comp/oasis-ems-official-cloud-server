@@ -110,7 +110,12 @@ function getAdaptiveRowHeight(doc, yStart, rowCount, fixedAfterTable, min = 11, 
 
 function formatOneDecimal(value) {
   const num = Number(value);
-  return Number.isFinite(num) ? num.toFixed(1) : '-';
+  return Number.isFinite(num) ? String(Math.round(num)) : '-';
+}
+
+function formatWholeNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? String(Math.round(num)) : '-';
 }
 
 function formatPoints(value) {
@@ -310,7 +315,7 @@ router.get('/student/:studentId/exam/:examId', (req, res) => {
       results,
       summary: {
         totalScore,
-        averageScore: Number(averageScore.toFixed(1)),
+        averageScore: Math.round(averageScore),
         rank: studentRanking?.rank || 0,
         totalStudents: rankings.length,
         overallGrade: overallGrade.grade,
@@ -481,16 +486,13 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
   const componentWeight = Number(exam.component_weight || 0);
   const currentWeight = Number(exam.current_weight || 100);
   const isMidterm = String(exam.type || '').toLowerCase() === 'midterm';
-  const useEndTermComposite = String(exam.type || '').toLowerCase() === 'endterm' && String(exam.component_exam_type || '').toLowerCase() === 'midterm';
-  const hasComponent = Boolean(exam.component_exam_name) && (componentWeight > 0 || useEndTermComposite);
+  const hasComponent = Boolean(exam.component_exam_id);
   const componentLabel = exam.component_exam_name || 'CAT';
   const currentLabel = exam.name || 'Current Exam';
-  const componentExamMax = Math.max(0, Number(exam.component_exam_max_score || 0));
   const weightedComponentExamMax = Math.max(1, Number(exam.component_exam_max_score || 100));
-  const remainingToHundred = Math.max(0, 100 - componentExamMax);
   const currentExamMax = Math.max(1, Number(exam.max_score || 100));
-  const caPercentLabel = useEndTermComposite ? componentExamMax : componentWeight;
-  const etPercentLabel = useEndTermComposite ? remainingToHundred : currentWeight;
+  const caPercentLabel = componentWeight;
+  const etPercentLabel = currentWeight;
 
   // Academic table card
   const columns = hasComponent
@@ -498,7 +500,7 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
         { key: 'subject', label: 'Subject', width: 95 },
         { key: 'ca', label: `C/A (${formatOneDecimal(caPercentLabel)}%)`, width: 70 },
         { key: 'exam', label: `E/T (${formatOneDecimal(etPercentLabel)}%)`, width: 70 },
-        { key: 'final', label: useEndTermComposite ? 'Final Mark (100%)' : 'Final Mark', width: 55 },
+        { key: 'final', label: 'Final Mark', width: 55 },
         { key: 'position', label: 'Position', width: 45 },
         ...(isMidterm ? [] : [{ key: 'grade', label: 'Grade', width: 45 }]),
         { key: 'remark', label: 'Remark', width: 75 },
@@ -545,19 +547,15 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
       ? '-'
       : (exam.grading_system === 'msce' ? String(result.points ?? gradeInfo.points ?? '-') : (result.grade || gradeInfo.grade));
     const remarkDisplay = result.remark || gradeInfo.remark || '';
-    const caValue = useEndTermComposite
-      ? Number(result.component_score || 0).toFixed(1)
-      : ((Number(result.component_score || 0) / weightedComponentExamMax) * componentWeight).toFixed(1);
-    const currentValue = useEndTermComposite
-      ? ((Number(result.current_score || 0) / currentExamMax) * remainingToHundred).toFixed(1)
-      : ((Number(result.current_score ?? result.score) / currentExamMax) * currentWeight).toFixed(1);
+    const caValue = formatWholeNumber((Number(result.component_score || 0) / weightedComponentExamMax) * componentWeight);
+    const currentValue = formatWholeNumber((Number(result.current_score ?? result.score) / currentExamMax) * currentWeight);
 
     const values = hasComponent
       ? [
           result.subject_name,
           caValue,
           currentValue,
-          result.score.toFixed(1),
+          formatWholeNumber(result.score),
           subjectRank > 0 ? formatRank(subjectRank) : '-',
           ...(isMidterm ? [] : [gradeDisplay]),
           remarkDisplay,
@@ -565,7 +563,7 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
         ]
       : [
           result.subject_name,
-          result.score.toFixed(1),
+          formatWholeNumber(result.score),
           subjectRank > 0 ? formatRank(subjectRank) : '-',
           ...(isMidterm ? [] : [gradeDisplay]),
           remarkDisplay,
@@ -600,8 +598,8 @@ router.get('/student/:studentId/exam/:examId/pdf', async (req, res) => {
     let legendY = y + 30;
     criteria.forEach((item) => {
       const text = exam.grading_system === 'msce'
-        ? `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${formatPoints(item.points)} pt`
-        : `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${item.grade}`;
+        ? `${formatWholeNumber(item.min_score)}-${formatWholeNumber(item.max_score)}: ${formatPoints(item.points)} pt`
+        : `${formatWholeNumber(item.min_score)}-${formatWholeNumber(item.max_score)}: ${item.grade}`;
       if (legendY > y + (compact ? 88 : 96)) return;
       doc.text(text, contentX + 14, legendY, { width: blockWidth - 24 });
       legendY += 12;
@@ -700,16 +698,13 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
   const componentWeight = Number(exam.component_weight || 0);
   const currentWeight = Number(exam.current_weight || 100);
   const isMidterm = String(exam.type || '').toLowerCase() === 'midterm';
-  const useEndTermComposite = String(exam.type || '').toLowerCase() === 'endterm' && String(exam.component_exam_type || '').toLowerCase() === 'midterm';
-  const hasComponent = Boolean(exam.component_exam_name) && (componentWeight > 0 || useEndTermComposite);
+  const hasComponent = Boolean(exam.component_exam_id);
   const componentLabel = exam.component_exam_name || 'CAT';
   const currentLabel = exam.name || 'Current Exam';
-  const componentExamMax = Math.max(0, Number(exam.component_exam_max_score || 0));
   const weightedComponentExamMax = Math.max(1, Number(exam.component_exam_max_score || 100));
-  const remainingToHundred = Math.max(0, 100 - componentExamMax);
   const currentExamMax = Math.max(1, Number(exam.max_score || 100));
-  const caPercentLabel = useEndTermComposite ? componentExamMax : componentWeight;
-  const etPercentLabel = useEndTermComposite ? remainingToHundred : currentWeight;
+  const caPercentLabel = componentWeight;
+  const etPercentLabel = currentWeight;
 
   const customDoc = new PDFDocument({ margin: 24, size: 'A4' });
   res.setHeader('Content-Type', 'application/pdf');
@@ -824,7 +819,7 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
           { key: 'subject', label: 'Subject', width: 95 },
           { key: 'ca', label: `C/A (${formatOneDecimal(caPercentLabel)}%)`, width: 70 },
           { key: 'exam', label: `E/T (${formatOneDecimal(etPercentLabel)}%)`, width: 70 },
-          { key: 'final', label: useEndTermComposite ? 'Final Mark (100%)' : 'Final Mark', width: 55 },
+          { key: 'final', label: 'Final Mark', width: 55 },
           { key: 'position', label: 'Position', width: 45 },
           ...(isMidterm ? [] : [{ key: 'grade', label: 'Grade', width: 45 }]),
           { key: 'remark', label: 'Remark', width: 75 },
@@ -867,18 +862,14 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
         ? '-'
         : (exam.grading_system === 'msce' ? String(result.points ?? gradeInfo.points ?? '-') : (result.grade || gradeInfo.grade));
       const remarkDisplay = result.remark || gradeInfo.remark || '';
-      const caValue = useEndTermComposite
-        ? Number(result.component_score || 0).toFixed(1)
-        : ((Number(result.component_score || 0) / weightedComponentExamMax) * componentWeight).toFixed(1);
-      const currentValue = useEndTermComposite
-        ? ((Number(result.current_score || 0) / currentExamMax) * remainingToHundred).toFixed(1)
-        : ((Number(result.current_score ?? result.score) / currentExamMax) * currentWeight).toFixed(1);
+      const caValue = formatWholeNumber((Number(result.component_score || 0) / weightedComponentExamMax) * componentWeight);
+      const currentValue = formatWholeNumber((Number(result.current_score ?? result.score) / currentExamMax) * currentWeight);
       const values = hasComponent
         ? [
             result.subject_name,
             caValue,
             currentValue,
-            result.score.toFixed(1),
+            formatWholeNumber(result.score),
             subjectRank > 0 ? formatRank(subjectRank) : '-',
             ...(isMidterm ? [] : [gradeDisplay]),
             remarkDisplay,
@@ -886,7 +877,7 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
           ]
         : [
             result.subject_name,
-            result.score.toFixed(1),
+            formatWholeNumber(result.score),
             subjectRank > 0 ? formatRank(subjectRank) : '-',
             ...(isMidterm ? [] : [gradeDisplay]),
             remarkDisplay,
@@ -916,8 +907,8 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
       let legendY = y + 30;
       criteria.forEach((item) => {
         const text = exam.grading_system === 'msce'
-          ? `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${formatPoints(item.points)} pt`
-          : `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${item.grade}`;
+          ? `${formatWholeNumber(item.min_score)}-${formatWholeNumber(item.max_score)}: ${formatPoints(item.points)} pt`
+          : `${formatWholeNumber(item.min_score)}-${formatWholeNumber(item.max_score)}: ${item.grade}`;
         if (legendY > y + (compact ? 88 : 96)) return;
         doc.text(text, contentX + 14, legendY, { width: blockWidth - 24 });
         legendY += 12;
@@ -1018,9 +1009,9 @@ router.get('/class/:classId/exam/:examId', (req, res) => {
       rankings,
       statistics: {
         totalStudents: rankings.length,
-        classAverage: Number(classAverage.toFixed(1)),
-        highestAverage: Number(highestAverage.toFixed(1)),
-        lowestAverage: Number(lowestAverage.toFixed(1))
+        classAverage: Math.round(classAverage),
+        highestAverage: Math.round(highestAverage),
+        lowestAverage: Math.round(lowestAverage)
       }
     }
   });
@@ -1066,10 +1057,10 @@ router.get('/class/:classId/exam/:examId/excel', (req, res) => {
       r.student.admission_number || '',
       ...subjects.map(s => {
         const score = resultMap.get(s.id);
-        return score !== undefined ? Number(score).toFixed(1) : '';
+        return score !== undefined ? formatWholeNumber(score) : '';
       }),
-      Number(r.totalScore ?? 0).toFixed(1),
-      Number(r.averageScore).toFixed(1),
+      formatWholeNumber(r.totalScore ?? 0),
+      formatWholeNumber(r.averageScore),
       overallGrade.grade
     ];
   });
@@ -1197,10 +1188,10 @@ router.get('/class/:classId/exam/:examId/pdf', (req, res) => {
       r.student.name,
       ...subjects.map((s) => {
         const score = resultMap.get(s.id);
-        return score !== undefined ? Number(score).toFixed(1) : '-';
+        return score !== undefined ? formatWholeNumber(score) : '-';
       }),
-      Number.isFinite(Number(r.totalScore)) ? Number(r.totalScore).toFixed(1) : '-',
-      Number.isFinite(r.averageScore) ? Number(r.averageScore).toFixed(1) : '-',
+      Number.isFinite(Number(r.totalScore)) ? formatWholeNumber(r.totalScore) : '-',
+      Number.isFinite(r.averageScore) ? formatWholeNumber(r.averageScore) : '-',
       exam.grading_system === 'msce' ? formatPoints(totalPoints) : String(overallGrade.grade)
     ];
 

@@ -4,7 +4,12 @@ import { DEFAULT_REPORT_CARD_DESIGN, resolveStoredReportCardDesign } from './rep
 
 function formatOneDecimal(value) {
   const num = Number(value);
-  return Number.isFinite(num) ? num.toFixed(1) : '-';
+  return Number.isFinite(num) ? String(Math.round(num)) : '-';
+}
+
+function formatWholeNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? String(Math.round(num)) : '-';
 }
 
 function formatPoints(value) {
@@ -95,7 +100,7 @@ function toRect(doc, block) {
   };
 }
 
-function getTableColumns({ hasComponent, isMidterm, useEndTermComposite, caPercentLabel, etPercentLabel, design }) {
+function getTableColumns({ hasComponent, isMidterm, caPercentLabel, etPercentLabel, design }) {
   const columns = [
     { key: 'subject', label: 'Subject', weight: hasComponent ? 2.4 : 2.5, align: 'left' },
   ];
@@ -104,7 +109,7 @@ function getTableColumns({ hasComponent, isMidterm, useEndTermComposite, caPerce
     columns.push(
       { key: 'ca', label: `C/A (${formatOneDecimal(caPercentLabel)}%)`, weight: 1.1, align: 'center' },
       { key: 'exam', label: `E/T (${formatOneDecimal(etPercentLabel)}%)`, weight: 1.1, align: 'center' },
-      { key: 'final', label: useEndTermComposite ? 'Final Mark (100%)' : 'Final Mark', weight: 1.1, align: 'center' },
+      { key: 'final', label: 'Final Mark', weight: 1.1, align: 'center' },
     );
   } else {
     columns.push({ key: 'score', label: 'Score', weight: 1.1, align: 'center' });
@@ -116,9 +121,8 @@ function getTableColumns({ hasComponent, isMidterm, useEndTermComposite, caPerce
 
   if (!isMidterm) {
     columns.push({ key: 'grade', label: 'Grade', weight: 0.9, align: 'center' });
+    columns.push({ key: 'remark', label: 'Remark', weight: 1.4, align: 'left' });
   }
-
-  columns.push({ key: 'remark', label: 'Remark', weight: 1.4, align: 'left' });
 
   if (design.features.showSubjectSignature) {
     columns.push({ key: 'signature', label: 'Signature', weight: 1.2, align: 'left' });
@@ -300,8 +304,8 @@ function renderGradingKey(doc, rect, { criteria, exam, design, isMidterm }) {
   criteria.slice(0, maxRows).forEach((item, index) => {
     const y = rect.y + 28 + index * lineHeight;
     const text = exam.grading_system === 'msce'
-      ? `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${formatPoints(item.points)} pt`
-      : `${formatOneDecimal(item.min_score)}-${formatOneDecimal(item.max_score)}: ${item.grade}`;
+      ? `${formatWholeNumber(item.min_score)}-${formatWholeNumber(item.max_score)}: ${formatPoints(item.points)} pt`
+      : `${formatWholeNumber(item.min_score)}-${formatWholeNumber(item.max_score)}: ${item.grade}`;
     doc.fillColor('#0f172a').font('Helvetica').fontSize(8.5).text(text, rect.x + 12, y, {
       width: rect.width - 24,
       ellipsis: true,
@@ -312,7 +316,7 @@ function renderGradingKey(doc, rect, { criteria, exam, design, isMidterm }) {
 function renderSummary(doc, rect, { exam, totalScore, totalPoints, overallGrade, passFail, design, isMidterm }) {
   drawCard(doc, rect, design);
   doc.fillColor(design.page.accentColor).font('Helvetica-Bold').fontSize(11).text(
-    design.text.summaryTitle,
+    isMidterm ? 'Summary' : design.text.summaryTitle,
     rect.x + 12,
     rect.y + 10,
     { width: rect.width - 24, align: 'center', ellipsis: true }
@@ -330,7 +334,7 @@ function renderSummary(doc, rect, { exam, totalScore, totalPoints, overallGrade,
     rows.push({ label: 'Overall Grade', value: 'N/A (Mid Term)' });
   }
 
-  if (design.features.showPassFailRemark) {
+  if (!isMidterm && design.features.showPassFailRemark) {
     rows.push({ label: 'Remarks', value: String(passFail?.status || '-') });
   }
 
@@ -414,15 +418,11 @@ export function renderStudentReportCardPage({
   const isMidterm = String(exam.type || '').toLowerCase() === 'midterm';
   const componentWeight = Number(exam.component_weight || 0);
   const currentWeight = Number(exam.current_weight || 100);
-  const useEndTermComposite = String(exam.type || '').toLowerCase() === 'endterm'
-    && String(exam.component_exam_type || '').toLowerCase() === 'midterm';
-  const hasComponent = Boolean(exam.component_exam_name) && (componentWeight > 0 || useEndTermComposite);
-  const componentExamMax = Math.max(0, Number(exam.component_exam_max_score || 0));
+  const hasComponent = Boolean(exam.component_exam_id);
   const weightedComponentExamMax = Math.max(1, Number(exam.component_exam_max_score || 100));
-  const remainingToHundred = Math.max(0, 100 - componentExamMax);
   const currentExamMax = Math.max(1, Number(exam.max_score || 100));
-  const caPercentLabel = useEndTermComposite ? componentExamMax : componentWeight;
-  const etPercentLabel = useEndTermComposite ? remainingToHundred : currentWeight;
+  const caPercentLabel = componentWeight;
+  const etPercentLabel = currentWeight;
 
   doc.save();
   doc.rect(0, 0, doc.page.width, doc.page.height).fill(design.page.backgroundColor || '#ffffff');
@@ -457,7 +457,6 @@ export function renderStudentReportCardPage({
     const columns = getTableColumns({
       hasComponent,
       isMidterm,
-      useEndTermComposite,
       caPercentLabel,
       etPercentLabel,
       design,
@@ -466,12 +465,8 @@ export function renderStudentReportCardPage({
     const rows = (results || []).map((result) => {
       const gradeInfo = getGrade(result.score, result.grading_system || exam.grading_system);
       const subjectRank = subjectRankMaps.get(result.subject_id)?.get(studentId) || 0;
-      const caValue = useEndTermComposite
-        ? Number(result.component_score || 0).toFixed(1)
-        : ((Number(result.component_score || 0) / weightedComponentExamMax) * componentWeight).toFixed(1);
-      const currentValue = useEndTermComposite
-        ? ((Number(result.current_score || 0) / currentExamMax) * remainingToHundred).toFixed(1)
-        : ((Number(result.current_score ?? result.score) / currentExamMax) * currentWeight).toFixed(1);
+      const caValue = formatWholeNumber((Number(result.component_score || 0) / weightedComponentExamMax) * componentWeight);
+      const currentValue = formatWholeNumber((Number(result.current_score ?? result.score) / currentExamMax) * currentWeight);
 
       return {
         subject: String(result.subject_name || ''),

@@ -33,6 +33,28 @@ if (!fs.existsSync(uploadsDir)) {
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+function resolveTrustProxySetting() {
+  const rawValue = process.env.OASIS_TRUST_PROXY;
+  const value = String(rawValue ?? '').trim();
+
+  if (!value) {
+    return process.env.NODE_ENV === 'production' || process.env.VERCEL || process.env.RAILWAY_ENVIRONMENT
+      ? 1
+      : false;
+  }
+
+  if (/^(false|0|no|off)$/i.test(value)) return false;
+  if (/^(true|1|yes|on)$/i.test(value)) return 1;
+
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : value;
+}
+
+const trustProxy = resolveTrustProxySetting();
+if (trustProxy !== false) {
+  app.set('trust proxy', trustProxy);
+}
+
 // Security middleware
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" },

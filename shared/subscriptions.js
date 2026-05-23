@@ -69,66 +69,21 @@ export function getFallbackDigitalSubscriptionCatalog(country) {
   const methods = getDigitalPaymentMethods(normalized);
 
   if (normalized === 'Nigeria') {
-    const plans = [
-      buildNormalizedPlan({
-        id: 'yearly',
-        name: 'Yearly',
-        durationMonths: 12,
-        amount: 300,
-        currency: 'USD',
-      }),
-    ];
-
     return {
       country: normalized,
       currency: 'USD',
       methods,
-      plans,
-      source: 'fallback',
+      plans: [],
+      source: 'unavailable',
     };
   }
-
-  const plans = [
-    buildNormalizedPlan({
-      id: 'online-per-term',
-      name: 'Online Per Term',
-      durationMonths: 3,
-      amount: 350000,
-      currency: 'MWK',
-      accessMode: 'online',
-    }),
-    buildNormalizedPlan({
-      id: 'online-yearly',
-      name: 'Online Yearly',
-      durationMonths: 12,
-      amount: 800000,
-      currency: 'MWK',
-      accessMode: 'online',
-    }),
-    buildNormalizedPlan({
-      id: 'offline-per-term',
-      name: 'Offline Per Term',
-      durationMonths: 3,
-      amount: 270000,
-      currency: 'MWK',
-      accessMode: 'offline',
-    }),
-    buildNormalizedPlan({
-      id: 'offline-yearly',
-      name: 'Offline Yearly',
-      durationMonths: 12,
-      amount: 700000,
-      currency: 'MWK',
-      accessMode: 'offline',
-    }),
-  ];
 
   return {
     country: normalized,
     currency: 'MWK',
     methods,
-    plans,
-    source: 'fallback',
+    plans: [],
+    source: 'unavailable',
   };
 }
 
@@ -223,3 +178,4 @@ export function calculateExpiryUnix(durationDays, issuedAt = Math.floor(Date.now
   const days = Number(durationDays || 0);
   return issuedAt + Math.max(0, days) * 24 * 60 * 60;
 }
+

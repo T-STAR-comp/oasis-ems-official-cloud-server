@@ -21,6 +21,11 @@ function defaultFallback(system) {
   return getFallbackGrade(system);
 }
 
+export function normalizeGradeScore(score) {
+  const numericScore = Number(score);
+  return Number.isFinite(numericScore) ? Math.round(numericScore) : numericScore;
+}
+
 export function getGradeCriteria(system = 'normal', customCriteria = null) {
   if (system === 'custom') {
     return normalizeCriteria(Array.isArray(customCriteria) ? customCriteria : []);
@@ -36,9 +41,10 @@ export function getGradeCriteria(system = 'normal', customCriteria = null) {
 }
 
 export function getGrade(score, system = 'normal', customCriteria = null) {
+  const gradeScore = normalizeGradeScore(score);
   const criteria = getGradeCriteria(system, customCriteria);
   for (const c of criteria) {
-    if (score >= c.min_score && score <= c.max_score) {
+    if (gradeScore >= c.min_score && gradeScore <= c.max_score) {
       return {
         grade: c.grade,
         points: c.points,
@@ -84,9 +90,25 @@ function resolveSubjectGrading(profileMap, subjectId, fallbackSystem) {
   };
 }
 
+function customCriteriaSupportsPointRanking(criteria = null) {
+  return Array.isArray(criteria)
+    && criteria.length > 0
+    && criteria.every((row) => Number.isFinite(Number(row?.points)));
+}
+
+function isSubjectPointBased(subjectGrading) {
+  if (!subjectGrading) return false;
+  if (subjectGrading.gradingSystem === 'custom') {
+    return customCriteriaSupportsPointRanking(subjectGrading.customCriteria);
+  }
+  return isPointBasedSystem(subjectGrading.gradingSystem);
+}
+
 function hasPointBasedResults(results = []) {
   if (!results.length) return false;
-  return results.every((row) => Number.isFinite(Number(row.points)));
+  return results.every(
+    (row) => row.point_based === true && Number.isFinite(Number(row.points))
+  );
 }
 
 function isEnglishSubject(row) {
@@ -111,7 +133,7 @@ export function calculateStudentResults(examId, studentId) {
     return { results: [], totalScore: 0, averageScore: 0, subjectCount: 0 };
   }
   const componentExam = exam.component_exam_id
-    ? db.prepare('SELECT id, type, max_score FROM exams WHERE id = ?').get(exam.component_exam_id)
+    ? db.prepare('SELECT id, max_score FROM exams WHERE id = ?').get(exam.component_exam_id)
     : null;
   const profileMap = loadExamSubjectProfiles(examId);
 
@@ -128,9 +150,11 @@ export function calculateStudentResults(examId, studentId) {
     const results = currentRows.map((row) => {
       const subjectGrading = resolveSubjectGrading(profileMap, row.subject_id, exam.grading_system);
       const gradeInfo = getGrade(row.score, subjectGrading.gradingSystem, subjectGrading.customCriteria);
+      const pointBased = isSubjectPointBased(subjectGrading);
       return {
         ...row,
         grading_system: subjectGrading.gradingSystem,
+        point_based: pointBased,
         grade: gradeInfo.grade,
         points: gradeInfo.points,
         remark: gradeInfo.remark,
@@ -172,20 +196,12 @@ export function calculateStudentResults(examId, studentId) {
     }
     const currentScore = Number(current?.score ?? 0);
     const componentScore = Number(component?.score ?? 0);
-    const useEndTermComposite =
-      exam.type === 'endterm' &&
-      componentExam &&
-      componentExam.type === 'midterm';
-    let finalScore;
-    if (useEndTermComposite) {
-      const remaining = Math.max(0, 100 - Number(componentExam?.max_score || 0));
-      const convertedCurrent = (currentScore / currentExamMax) * remaining;
-      finalScore = Number((componentScore + convertedCurrent).toFixed(2));
-    } else {
-      finalScore = Number((((componentScore / componentExamMax) * componentWeight) + ((currentScore / currentExamMax) * currentWeight)).toFixed(2));
-    }
+    const finalScore = Number(
+      (((componentScore / componentExamMax) * componentWeight) + ((currentScore / currentExamMax) * currentWeight)).toFixed(2)
+    );
     const subjectGrading = resolveSubjectGrading(profileMap, subjectId, exam.grading_system);
     const gradeInfo = getGrade(finalScore, subjectGrading.gradingSystem, subjectGrading.customCriteria);
+    const pointBased = isSubjectPointBased(subjectGrading);
 
     results.push({
       subject_id: subjectId,
@@ -195,6 +211,7 @@ export function calculateStudentResults(examId, studentId) {
       current_score: currentScore,
       component_score: componentScore,
       grading_system: subjectGrading.gradingSystem,
+      point_based: pointBased,
       grade: gradeInfo.grade,
       points: gradeInfo.points,
       remark: gradeInfo.remark,
@@ -265,7 +282,7 @@ export function rankStudentsByExam(examId) {
         if (curr.totalPoints !== prev.totalPoints) {
           currentRank = i + 1;
         }
-      } else if (curr.totalScore !== prev.totalScore) {
+      } else if (curr.totalScore !== prev.totalScore || curr.averageScore !== prev.averageScore) {
         currentRank = i + 1;
       }
     }

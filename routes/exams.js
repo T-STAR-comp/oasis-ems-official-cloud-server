@@ -727,6 +727,7 @@ router.post('/:id/results', examValidation.addResult, (req, res, next) => {
       if (!Number.isFinite(numericScore) || numericScore < 0 || numericScore > examMaxScore) {
         return res.status(400).json({ error: `Score must be between 0 and ${examMaxScore}` });
       }
+      const roundedScore = Math.round(numericScore);
 
       const student = getStudent.get(student_id);
       if (!student) {
@@ -749,11 +750,11 @@ router.post('/:id/results', examValidation.addResult, (req, res, next) => {
       }
 
       const subjectGrading = resolveSubjectGrading(profileMap, subject_id, exam.grading_system);
-      const { grade, points } = getGrade(numericScore, subjectGrading.gradingSystem, subjectGrading.customCriteria);
+      const { grade, points } = getGrade(roundedScore, subjectGrading.gradingSystem, subjectGrading.customCriteria);
 
       insert.run(
-        exam_id, student_id, subject_id, numericScore, grade, points,
-        numericScore, grade, points
+        exam_id, student_id, subject_id, roundedScore, grade, points,
+        roundedScore, grade, points
       );
 
       const result = db.prepare(`
@@ -836,9 +837,10 @@ router.post('/:id/results/bulk', authenticateToken, (req, res, next) => {
           continue;
         }
 
+        const roundedScore = Math.round(score);
         const subjectGrading = resolveSubjectGrading(profileMap, r.subject_id, exam.grading_system);
-        const { grade, points } = getGrade(score, subjectGrading.gradingSystem, subjectGrading.customCriteria);
-        upsert.run(exam_id, r.student_id, r.subject_id, score, grade, points, score, grade, points);
+        const { grade, points } = getGrade(roundedScore, subjectGrading.gradingSystem, subjectGrading.customCriteria);
+        upsert.run(exam_id, r.student_id, r.subject_id, roundedScore, grade, points, roundedScore, grade, points);
         saved++;
       }
 

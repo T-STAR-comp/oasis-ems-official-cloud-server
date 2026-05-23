@@ -358,8 +358,9 @@ router.post('/marks', upload.single('file'), async (req, res, next) => {
             continue;
           }
 
-          const { grade, points } = getGrade(score, exam.grading_system);
-          upsert.run(exam_id, studentId, subjectId, score, grade, points, score, grade, points);
+          const roundedScore = Math.round(score);
+          const { grade, points } = getGrade(roundedScore, exam.grading_system);
+          upsert.run(exam_id, studentId, subjectId, roundedScore, grade, points, roundedScore, grade, points);
           saved++;
         }
 
