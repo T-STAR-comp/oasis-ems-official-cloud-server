@@ -987,4 +987,72 @@ export function resetEducationData(nextCountry) {
   return { country, schoolId };
 }
 
+export function getDatabaseDebugInfo(targetSchoolId = null) {
+  const normalizedSchoolId = normalizeSchoolId(targetSchoolId || getContextSchoolId());
+  const dataRoot = resolveDataRoot();
+  const info = {
+    mode: USE_MYSQL ? 'mysql' : 'sqlite',
+    data_root: USE_MYSQL ? null : dataRoot,
+    requested_school_id: normalizedSchoolId || null,
+    mysql_database: normalizedSchoolId && USE_MYSQL ? resolveMysqlDatabaseName(normalizedSchoolId) : null,
+    sqlite_path: normalizedSchoolId && !USE_MYSQL ? resolveTenantDatabasePath(normalizedSchoolId) : null,
+    known_sqlite_tenants: [],
+    snapshot: null,
+  };
+
+  if (!USE_MYSQL) {
+    const schoolsRoot = path.join(dataRoot, 'schools');
+    try {
+      info.known_sqlite_tenants = fs.existsSync(schoolsRoot)
+        ? fs.readdirSync(schoolsRoot, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => entry.name)
+        : [];
+    } catch (error) {
+      info.known_sqlite_tenants_error = error.message || 'Failed to list tenant directories.';
+    }
+  }
+
+  if (!normalizedSchoolId) {
+    return info;
+  }
+
+  try {
+    info.snapshot = runWithSchoolContext(normalizedSchoolId, () => {
+      const tables = [
+        'users',
+        'school_info',
+        'classes',
+        'students',
+        'subjects',
+        'exams',
+        'exam_results',
+        'subscription_records',
+      ];
+      const counts = {};
+      tables.forEach((table) => {
+        try {
+          counts[table] = Number(db.prepare(`SELECT COUNT(*) as count FROM ${table}`).get()?.count || 0);
+        } catch (error) {
+          counts[table] = `error: ${error.message || 'failed'}`;
+        }
+      });
+      const school = db.prepare('SELECT id, name, email, country, school_id, updated_at FROM school_info WHERE id = 1').get() || null;
+      const subscriptions = db.prepare(`
+        SELECT id, school_id, plan_kind, status, charge_id, payment_method, payment_channel,
+               amount, currency, duration_days, online_features_enabled, activated_at,
+               expires_at, created_at, updated_at
+        FROM subscription_records
+        ORDER BY created_at DESC
+        LIMIT 20
+      `).all();
+      return { counts, school, recent_subscriptions: subscriptions };
+    }, { allowCreate: false });
+  } catch (error) {
+    info.snapshot_error = error.message || 'Failed to inspect tenant database.';
+  }
+
+  return info;
+}
+
 export default db;

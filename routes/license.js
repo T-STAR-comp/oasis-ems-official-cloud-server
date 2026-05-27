@@ -14,6 +14,7 @@ import {
   normalizeSubscriptionCountry,
   splitFullName,
 } from '../shared/subscriptions.js';
+import { logError, logInfo } from '../utils/logger.js';
 
 const router = express.Router();
 
@@ -166,22 +167,11 @@ function sanitizePaymentLogValue(value, key = '') {
 }
 
 function logPaymentEvent(event, details = {}) {
-  console.log(
-    `${PAYMENT_LOG_PREFIX} ${new Date().toISOString()} ${event}`,
-    sanitizePaymentLogValue(details)
-  );
+  logInfo(`${PAYMENT_LOG_PREFIX}.${event}`, sanitizePaymentLogValue(details));
 }
 
 function logPaymentError(event, error, details = {}) {
-  const payload = sanitizePaymentLogValue(details);
-  console.error(`${PAYMENT_LOG_PREFIX} ${new Date().toISOString()} ${event}`, {
-    ...payload,
-    error: {
-      message: error?.message || 'Unknown payment error.',
-      stack: error?.stack || null,
-      statusCode: Number(error?.statusCode || error?.status || 0) || null,
-    },
-  });
+  logError(`${PAYMENT_LOG_PREFIX}.${event}`, error, sanitizePaymentLogValue(details));
 }
 
 function createHttpError(message, statusCode = 400, details = {}) {

@@ -23,6 +23,9 @@ const MASKED_KEYS = new Set([
   'school_id',
 ]);
 
+const MAX_LOG_ENTRIES = Number(process.env.OASIS_DEBUG_LOG_LIMIT || 1000);
+const logEntries = [];
+
 function maskValue(value) {
   const raw = String(value || '').trim();
   if (!raw) return raw;
@@ -56,16 +59,43 @@ export function sanitizeForLog(value, key = '') {
   return value;
 }
 
+export function recordLog(level, event, details = {}) {
+  const entry = {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    timestamp: new Date().toISOString(),
+    level,
+    event,
+    details: sanitizeForLog(details),
+  };
+  logEntries.push(entry);
+  while (logEntries.length > MAX_LOG_ENTRIES) {
+    logEntries.shift();
+  }
+  return entry;
+}
+
+export function getRecentLogs({ limit = 200, level, event } = {}) {
+  const normalizedLimit = Math.max(1, Math.min(Number(limit || 200), MAX_LOG_ENTRIES));
+  const normalizedLevel = String(level || '').trim().toLowerCase();
+  const normalizedEvent = String(event || '').trim().toLowerCase();
+  return logEntries
+    .filter((entry) => !normalizedLevel || entry.level === normalizedLevel)
+    .filter((entry) => !normalizedEvent || String(entry.event || '').toLowerCase().includes(normalizedEvent))
+    .slice(-normalizedLimit);
+}
+
 export function logInfo(event, details = {}) {
-  console.log(`[oasis-cloud] ${new Date().toISOString()} ${event}`, sanitizeForLog(details));
+  const entry = recordLog('info', event, details);
+  console.log(`[oasis-cloud] ${entry.timestamp} ${event}`, entry.details);
 }
 
 export function logWarn(event, details = {}) {
-  console.warn(`[oasis-cloud] ${new Date().toISOString()} ${event}`, sanitizeForLog(details));
+  const entry = recordLog('warn', event, details);
+  console.warn(`[oasis-cloud] ${entry.timestamp} ${event}`, entry.details);
 }
 
 export function logError(event, error, details = {}) {
-  console.error(`[oasis-cloud] ${new Date().toISOString()} ${event}`, {
+  const payload = {
     ...sanitizeForLog(details),
     error: {
       name: error?.name || null,
@@ -74,5 +104,7 @@ export function logError(event, error, details = {}) {
       status: Number(error?.statusCode || error?.status || 0) || null,
       stack: error?.stack || null,
     },
-  });
+  };
+  const entry = recordLog('error', event, payload);
+  console.error(`[oasis-cloud] ${entry.timestamp} ${event}`, entry.details);
 }
