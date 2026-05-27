@@ -74,6 +74,10 @@ const tenantConnections = new Map();
 const initializedTenants = new Set();
 const initializingTenants = new Set();
 const USE_MYSQL = isMysqlEnabled();
+console.log('[oasis-cloud] startup.database_mode', {
+  mode: USE_MYSQL ? 'mysql' : 'sqlite',
+  data_dir: process.env.OASIS_DATA_DIR || null,
+});
 
 function getContextStore() {
   return tenantContext.getStore() || null;
@@ -167,6 +171,12 @@ function getTenantConnection(schoolId, { allowCreate = false } = {}) {
   const dbPath = USE_MYSQL
     ? resolveMysqlDatabaseName(normalizedSchoolId)
     : resolveTenantDatabasePath(normalizedSchoolId);
+  console.log('[oasis-cloud] tenant.connection_resolve', {
+    school_id: normalizedSchoolId,
+    storage: USE_MYSQL ? 'mysql' : 'sqlite',
+    target: dbPath,
+    allow_create: allowCreate === true,
+  });
   if (!USE_MYSQL && !fs.existsSync(dbPath)) {
     migrateLegacyDatabaseIfNeeded(normalizedSchoolId, dbPath);
   }
@@ -178,6 +188,11 @@ function getTenantConnection(schoolId, { allowCreate = false } = {}) {
   if (!connection) {
     connection = createConnection(dbPath);
     tenantConnections.set(normalizedSchoolId, connection);
+    console.log('[oasis-cloud] tenant.connection_created', {
+      school_id: normalizedSchoolId,
+      storage: USE_MYSQL ? 'mysql' : 'sqlite',
+      target: dbPath,
+    });
   }
 
   ensureTenantInitialized(normalizedSchoolId);
@@ -230,6 +245,10 @@ export function resolveSchoolIdFromImportPayload(payload) {
 }
 const UID_SECRET = process.env.OASIS_UID_SECRET || '';
 if (!UID_SECRET.trim()) {
+  console.error('[oasis-cloud] startup.config_error', {
+    message: 'Missing OASIS_UID_SECRET environment variable.',
+    hint: 'Set OASIS_UID_SECRET in cPanel Node.js environment variables, then restart the app.',
+  });
   throw new Error('Missing OASIS_UID_SECRET environment variable.');
 }
 

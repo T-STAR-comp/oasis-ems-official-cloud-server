@@ -22,6 +22,8 @@ const LICENSE_SERVER_URL = String(
 ).trim().replace(/\/+$/, '');
 const PLANS_SERVER_URL = String(
   process.env.OASIS_PUBLIC_URL_SERVER ||
+  process.env.OASIS_PLANS_SERVER_URL ||
+  process.env.OASIS_LICENSE_SERVER_URL ||
   process.env.OASIS_LEGACY_LICENSE_SERVER_URL ||
   'https://ems-license-server.vercel.app'
 ).trim().replace(/\/+$/, '');
@@ -282,22 +284,51 @@ async function fetchDigitalPlansCatalog(country, logContext = {}) {
   const normalizedCountry = normalizeSubscriptionCountry(country);
   const fallback = getFallbackDigitalSubscriptionCatalog(normalizedCountry);
   if (!PLANS_SERVER_URL) {
+    logPaymentEvent('digital.plans.no_server_url', {
+      ...logContext,
+      country: normalizedCountry,
+      fallback_source: fallback.source,
+    });
     return fallback;
   }
 
   try {
+    const plansUrl = `${PLANS_SERVER_URL}/plans`;
+    logPaymentEvent('digital.plans.fetch_start', {
+      ...logContext,
+      country: normalizedCountry,
+      plans_url: plansUrl,
+      timeout_ms: PLANS_FETCH_TIMEOUT_MS,
+    });
     const response = await fetch(`${PLANS_SERVER_URL}/plans`, {
       method: 'GET',
       signal: AbortSignal.timeout(PLANS_FETCH_TIMEOUT_MS),
     });
     const payload = await response.json().catch(() => ({}));
+    logPaymentEvent('digital.plans.fetch_response', {
+      ...logContext,
+      country: normalizedCountry,
+      plans_url: plansUrl,
+      status_code: response.status,
+      raw_plan_count: Array.isArray(payload?.plans) ? payload.plans.length : 0,
+      payload,
+    });
     if (!response.ok) {
       throw createHttpError(
         payload?.error || `Failed to load plans (${response.status}).`,
         response.status
       );
     }
-    return normalizeRemoteDigitalPlans(normalizedCountry, payload);
+    const normalized = normalizeRemoteDigitalPlans(normalizedCountry, payload);
+    logPaymentEvent('digital.plans.normalized', {
+      ...logContext,
+      country: normalizedCountry,
+      source: normalized.source,
+      plan_count: Array.isArray(normalized?.plans) ? normalized.plans.length : 0,
+      method_count: Array.isArray(normalized?.methods) ? normalized.methods.length : 0,
+      plans: normalized.plans,
+    });
+    return normalized;
   } catch (error) {
     logPaymentError('digital.plans.fetch_failed', error, {
       ...logContext,

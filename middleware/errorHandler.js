@@ -1,5 +1,13 @@
+import { logError } from '../utils/logger.js';
+
 export function errorHandler(err, req, res, next) {
-  console.error('Error:', err);
+  logError('request.error', err, {
+    request_id: req.requestId || null,
+    method: req.method,
+    path: req.originalUrl,
+    status: err.statusCode || err.status || null,
+    school_id: req.query?.school_id || req.body?.school_id || req.user?.school_id || null,
+  });
 
   // SQLite constraint errors
   if (err.code === 'SQLITE_CONSTRAINT') {
