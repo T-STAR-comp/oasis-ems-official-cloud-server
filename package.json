@@ -3,10 +3,11 @@
   "version": "2.0.0",
   "type": "module",
   "description": "School grading and report card processing server",
-  "main": "server.js",
+  "main": "passenger-boot.cjs",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "start:cpanel": "node passenger-boot.cjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

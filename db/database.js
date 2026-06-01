@@ -243,17 +243,16 @@ export function bindSchoolContext(req, _res, next) {
 export function resolveSchoolIdFromImportPayload(payload) {
   return inferSchoolIdFromImportPayload(payload);
 }
-const UID_SECRET = process.env.OASIS_UID_SECRET || '';
-if (!UID_SECRET.trim()) {
-  console.error('[oasis-cloud] startup.config_error', {
-    message: 'Missing OASIS_UID_SECRET environment variable.',
-    hint: 'Set OASIS_UID_SECRET in cPanel Node.js environment variables, then restart the app.',
-  });
-  throw new Error('Missing OASIS_UID_SECRET environment variable.');
+function resolveUidSecret() {
+  const secret = String(process.env.OASIS_UID_SECRET || process.env.JWT_SECRET || '').trim();
+  if (!secret) {
+    throw new Error('Missing OASIS_UID_SECRET environment variable.');
+  }
+  return secret;
 }
 
 function uidSecretKey() {
-  return crypto.createHash('sha256').update(UID_SECRET).digest();
+  return crypto.createHash('sha256').update(resolveUidSecret()).digest();
 }
 
 function encryptUid(uid) {
