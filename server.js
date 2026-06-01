@@ -20,6 +20,7 @@ import systemRoutes from './routes/system.js';
 import analyticsRoutes from './routes/analytics.js';
 import debugRoutes from './routes/debug.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { jsonApiHeaders } from './middleware/jsonApi.js';
 import { logError, logInfo, logWarn, sanitizeForLog } from './utils/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -40,7 +41,8 @@ logInfo('startup.paths_resolved', {
 });
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = Number(process.env.PORT || 3001);
+const isPassenger = Boolean(process.env.PASSENGER_APP_ENV || process.env.PASSENGER_BASE_URI);
 
 function resolveTrustProxySetting() {
   const rawValue = process.env.OASIS_TRUST_PROXY;
@@ -64,6 +66,8 @@ if (trustProxy !== false) {
   app.set('trust proxy', trustProxy);
 }
 logInfo('startup.trust_proxy', { trust_proxy: trustProxy });
+
+app.use(jsonApiHeaders);
 
 // Security middleware
 app.use(helmet({
@@ -174,20 +178,42 @@ app.use('/api/system', systemRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/debug', debugRoutes);
 
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({
+function buildHealthPayload(req) {
+  return {
     status: 'ok',
+    service: 'oasis-ems-cloud',
     timestamp: new Date().toISOString(),
     request_id: req.requestId || null,
     environment: {
       node_env: process.env.NODE_ENV || null,
-      passenger: Boolean(process.env.PASSENGER_APP_ENV || process.env.PASSENGER_BASE_URI),
+      passenger: isPassenger,
       uploads_dir: uploadsDir,
       data_dir: process.env.OASIS_DATA_DIR || null,
       cors_origin_count: allowedOrigins.size,
+      database_mode: process.env.OASIS_USE_MYSQL === 'true' || process.env.OASIS_USE_MYSQL === '1'
+        ? 'mysql'
+        : 'sqlite',
     },
+    endpoints: {
+      health: '/api/health',
+      diagnostics: '/api/debug/diagnostics',
+      ping: '/api/debug/ping',
+    },
+  };
+}
+
+app.get('/', (req, res) => {
+  res.json({
+    service: 'oasis-ems-cloud',
+    status: 'ok',
+    message: 'Oasis EMS cloud API is running. Use /api/health for health checks.',
+    health: '/api/health',
+    diagnostics: '/api/debug/diagnostics',
   });
+});
+
+app.get(['/health', '/api/health', '/api/health.json'], (req, res) => {
+  res.json(buildHealthPayload(req));
 });
 
 // Error handling
@@ -211,14 +237,22 @@ process.on('unhandledRejection', (reason) => {
   logError('process.unhandled_rejection', reason instanceof Error ? reason : new Error(String(reason)));
 });
 
-app.listen(PORT, () => {
-  logInfo('startup.listen', {
-    port: PORT,
-    message: `Server running on http://localhost:${PORT}`,
+if (!isPassenger) {
+  const host = String(process.env.OASIS_SERVER_HOST || '0.0.0.0').trim() || '0.0.0.0';
+  app.listen(PORT, host, () => {
+    logInfo('startup.listen', {
+      port: PORT,
+      host,
+      message: `Server running on http://${host}:${PORT}`,
+    });
+    logInfo('startup.ready', { message: 'School Grading System API ready' });
+    console.log(`🚀 Server running on http://${host}:${PORT}`);
+    console.log(`📚 School Grading System API ready`);
   });
-  logInfo('startup.ready', { message: 'School Grading System API ready' });
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`📚 School Grading System API ready`);
-});
+} else {
+  logInfo('startup.passenger_mode', {
+    message: 'Running under Passenger; HTTP listen skipped.',
+  });
+}
 
 export default app;
