@@ -740,6 +740,48 @@ function insertSubscriptionRecord({
   return id;
 }
 
+function normalizeSchoolId(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+router.get('/school-access', async (req, res, next) => {
+  try {
+    const schoolId = normalizeSchoolId(req.query?.school_id);
+    if (!schoolId) {
+      return res.status(400).json({ error: 'school_id is required.' });
+    }
+
+    const payload = await runWithSchoolContext(schoolId, async () => {
+      const row = db.prepare(`
+        SELECT status, online_features_enabled, expires_at, plan_kind
+        FROM subscription_records
+        WHERE status = 'active'
+        ORDER BY expires_at DESC
+        LIMIT 1
+      `).get();
+
+      const expiresAt = row?.expires_at
+        ? Math.floor(new Date(row.expires_at).getTime() / 1000)
+        : 0;
+      const now = Math.floor(Date.now() / 1000);
+      const active = Boolean(row) && (!expiresAt || expiresAt > now);
+      const onlineFeaturesEnabled = active && Number(row?.online_features_enabled || 0) === 1;
+
+      return {
+        school_id: schoolId,
+        active,
+        online_features_enabled: onlineFeaturesEnabled,
+        plan_kind: row?.plan_kind || null,
+        expires_at: expiresAt || null,
+      };
+    });
+
+    return res.json(payload);
+  } catch (error) {
+    return next(error);
+  }
+});
+
 router.get('/plans', async (req, res) => {
   try {
     const country = normalizeSubscriptionCountry(req.query?.country || req.body?.country);
