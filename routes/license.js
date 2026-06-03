@@ -33,12 +33,33 @@ const PAYCHANGU_BASE_URL = String(process.env.PAYCHANGU_BASE_URL || 'https://api
 const PAYCHANGU_SECRET_KEY = String(
   process.env.PAYCHANGU_SECRET_KEY || process.env.PAYCHANGU_API_KEY || ''
 ).trim();
-const SMTP_HOST = String(process.env.SMTP_HOST || '').trim();
-const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
-const SMTP_SECURE = String(process.env.SMTP_SECURE || '').trim().toLowerCase() === 'true';
-const SMTP_USER = String(process.env.SMTP_USER || '').trim();
-const SMTP_PASS = String(process.env.SMTP_PASS || '').trim();
-const SMTP_FROM = String(process.env.SMTP_FROM || SMTP_USER || 'no-reply@oasis-ems.local').trim();
+function resolveSmtpConfig() {
+  const host = String(process.env.MAIL_HOST || process.env.SMTP_HOST || '').trim();
+  const port = Number(process.env.MAIL_PORT || process.env.SMTP_PORT || 587);
+  const user = String(process.env.MAIL_USERNAME || process.env.SMTP_USER || '').trim();
+  const pass = String(process.env.MAIL_PASSWORD || process.env.SMTP_PASS || '').trim();
+  const encryption = String(process.env.MAIL_ENCRYPTION || '').trim().toLowerCase();
+  const secureFlag = String(process.env.SMTP_SECURE || '').trim().toLowerCase();
+  const secure = encryption === 'ssl'
+    || secureFlag === 'true'
+    || (port === 465 && encryption !== 'tls' && secureFlag !== 'false');
+
+  const fromAddress = String(
+    process.env.MAIL_FROM_ADDRESS || process.env.SMTP_FROM || user || 'no-reply@oasis-ems.local'
+  ).trim();
+  const fromName = String(process.env.MAIL_FROM_NAME || '').trim();
+  const from = fromName ? `"${fromName.replace(/"/g, '\\"')}" <${fromAddress}>` : fromAddress;
+
+  return { host, port, user, pass, secure, from };
+}
+
+const SMTP_CONFIG = resolveSmtpConfig();
+const SMTP_HOST = SMTP_CONFIG.host;
+const SMTP_PORT = SMTP_CONFIG.port;
+const SMTP_SECURE = SMTP_CONFIG.secure;
+const SMTP_USER = SMTP_CONFIG.user;
+const SMTP_PASS = SMTP_CONFIG.pass;
+const SMTP_FROM = SMTP_CONFIG.from;
 const PAYMENT_LOG_INCLUDE_FULL_ACTIVATION_CODES = String(
   process.env.PAYMENT_LOG_INCLUDE_FULL_ACTIVATION_CODES || 'false'
 ).trim().toLowerCase() === 'true';
