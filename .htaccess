@@ -1,0 +1,18 @@
+# Oasis EMS cloud-server — cPanel / LiteSpeed + Passenger routing
+#
+# cPanel's "Setup Node.js App" normally generates PassengerAppRoot / PassengerStartupFile
+# directives above this block. If only GET / works and /api/* downloads passenger-boot.cjs,
+# the Passenger fallback section below is missing or was overwritten — keep it in place.
+
+# DO NOT REMOVE OR MODIFY. CLOUDLINUX PASSENGER FALLBACK BEGIN
+RewriteEngine On
+RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ / [QSA,L]
+# DO NOT REMOVE OR MODIFY. CLOUDLINUX PASSENGER FALLBACK END
+
+# Block direct HTTP access to application source (Passenger still reads these locally).
+<FilesMatch "^(passenger-boot\.cjs|server\.js|createApp\.mjs|app\.js|\.env)$">
+  Require all denied
+</FilesMatch>

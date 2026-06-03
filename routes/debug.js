@@ -1,13 +1,13 @@
 import express from 'express';
 import { getDatabaseDebugInfo } from '../db/database.js';
 import { getRecentLogs, logInfo } from '../utils/logger.js';
-import { probeCloudHealth, probeHttpEndpoint } from '../../shared/connectivityProbe.js';
+import { probeCloudHealth, probeHttpEndpoint } from '../shared/connectivityProbe.js';
 import {
   fetchCloudServerUrlFromLicenseServer,
   getCloudServerUrlOverride,
   getDiscoveryServerUrl,
   readCachedCloudServerUrl,
-} from '../../shared/cloudServerDiscovery.js';
+} from '../shared/cloudServerDiscovery.js';
 
 const router = express.Router();
 const PAYCHANGU_BASE_URL = String(process.env.PAYCHANGU_BASE_URL || 'https://api.paychangu.com').trim().replace(/\/+$/, '');
