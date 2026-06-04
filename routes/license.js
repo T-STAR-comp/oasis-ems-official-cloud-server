@@ -740,10 +740,6 @@ function insertSubscriptionRecord({
   return id;
 }
 
-function normalizeSchoolId(value) {
-  return String(value || '').trim().toUpperCase();
-}
-
 router.get('/school-access', async (req, res, next) => {
   try {
     const schoolId = normalizeSchoolId(req.query?.school_id);
