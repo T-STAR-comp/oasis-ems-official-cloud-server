@@ -233,6 +233,28 @@ router.get('/:id', idValidation, (req, res) => {
     'SELECT * FROM subjects WHERE class_id = ? ORDER BY name ASC'
   ).all(exam.class_id);
 
+  const subjectIdsByStudent = db.prepare(`
+    SELECT ss.student_id, ss.subject_id
+    FROM student_subjects ss
+    JOIN students st ON st.id = ss.student_id
+    JOIN subjects sub ON sub.id = ss.subject_id
+    WHERE st.class_id = ? AND sub.class_id = ?
+  `).all(exam.class_id, exam.class_id);
+  const studentSubjectMap = new Map();
+  subjectIdsByStudent.forEach((row) => {
+    const list = studentSubjectMap.get(row.student_id) || [];
+    list.push(row.subject_id);
+    studentSubjectMap.set(row.student_id, list);
+  });
+  const allSubjectIds = subjects.map((subject) => subject.id);
+  const hydratedStudents = students.map((student) => {
+    const subject_ids = studentSubjectMap.get(student.id) || [];
+    return {
+      ...student,
+      subject_ids: subject_ids.length ? subject_ids : allSubjectIds,
+    };
+  });
+
   // Get rankings
   const rankings = rankStudentsByExam(id);
   const subjectGradingProfiles = db.prepare(`
@@ -252,7 +274,7 @@ router.get('/:id', idValidation, (req, res) => {
       results,
       componentResults,
       mergeSources,
-      students,
+      students: hydratedStudents,
       subjects,
       rankings,
       subject_grading_profiles: subjectGradingProfiles,
