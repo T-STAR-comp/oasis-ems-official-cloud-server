@@ -70,25 +70,36 @@ function applyImportPayload(payload) {
   tx(payload || {});
 }
 
-function hasValidBootstrapGrant(bootstrap) {
+function hasValidMigrationGrant(bootstrap) {
   const internalUid = String(bootstrap?.internal_uid || '').trim();
   const chargeId = String(bootstrap?.charge_id || '').trim();
-  if (!internalUid && !chargeId) {
+  const activationCode = String(bootstrap?.activation_code || '').trim();
+  if (!internalUid && !chargeId && !activationCode) {
     return false;
   }
 
   const row = db.prepare(`
-    SELECT id
+    SELECT id, status
     FROM subscription_records
     WHERE online_features_enabled = 1
-      AND status = 'active'
+      AND status IN ('active', 'pending_activation')
       AND (
         (? != '' AND internal_uid = ?)
         OR (? != '' AND charge_id = ?)
+        OR (? != '' AND activation_code = ?)
       )
-    ORDER BY created_at DESC
+    ORDER BY
+      CASE status WHEN 'active' THEN 0 ELSE 1 END,
+      COALESCE(expires_at, created_at) DESC
     LIMIT 1
-  `).get(internalUid, internalUid, chargeId, chargeId);
+  `).get(
+    internalUid,
+    internalUid,
+    chargeId,
+    chargeId,
+    activationCode,
+    activationCode
+  );
 
   return Boolean(row);
 }
@@ -114,8 +125,18 @@ router.post('/import-bootstrap', (req, res) => {
     return res.status(400).json({ error: 'School ID is missing from the migration payload.' });
   }
 
+  const payload = { data, bootstrap: bootstrap || {} };
+
   return runWithSchoolContext(schoolId, () => {
     initializeDatabase(schoolId);
+
+    if (hasValidMigrationGrant(payload.bootstrap)) {
+      applyImportPayload(data);
+      return res.json({
+        message: isFreshBootstrapState() ? 'Bootstrap import completed' : 'Migration import completed',
+        school_id: schoolId,
+      });
+    }
 
     if (!isFreshBootstrapState()) {
       return authenticateToken(req, res, () => {
@@ -125,14 +146,9 @@ router.post('/import-bootstrap', (req, res) => {
       });
     }
 
-    if (!hasValidBootstrapGrant(bootstrap)) {
-      return res.status(403).json({
-        error: 'Cloud bootstrap requires an active online-enabled subscription from the source installation.',
-      });
-    }
-
-    applyImportPayload(data);
-    return res.json({ message: 'Bootstrap import completed', school_id: schoolId });
+    return res.status(403).json({
+      error: 'Cloud migration requires a verified online subscription for this School ID. Finish payment verification and activation, then try again.',
+    });
   }, { allowCreate: true });
 });
 
