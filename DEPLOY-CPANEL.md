@@ -38,7 +38,16 @@ OASIS_USE_MYSQL=true
 MYSQL_HOST=localhost
 MYSQL_USER=...
 MYSQL_PASSWORD=...
-MYSQL_DATABASE=...
+MYSQL_DATABASE=your_cpanel_database_name
+```
+
+cPanel grants **one** MySQL database per app user. When `MYSQL_DATABASE` is set, the cloud server stores each migrated school in **prefixed tables** inside that database (for example `ems_oasis_abc123_users`). You do **not** need `CREATE DATABASE` privileges.
+
+For a VPS with full MySQL admin rights and separate databases per school:
+
+```env
+OASIS_MYSQL_TENANT_MODE=database
+MYSQL_DATABASE_PREFIX=oasis_ems
 ```
 
 ## Verify after restart

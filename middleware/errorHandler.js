@@ -1,3 +1,4 @@
+import { resolveClientError } from '../utils/clientError.js';
 import { logError } from '../utils/logger.js';
 
 export function errorHandler(err, req, res, next) {
@@ -44,13 +45,11 @@ export function errorHandler(err, req, res, next) {
     return res.status(401).json({ error: 'Token expired' });
   }
 
-  // Default error
-  const statusCode = err.statusCode || 500;
-  const message = err.message || 'Internal server error';
+  const { statusCode, message } = resolveClientError(err);
 
   res.status(statusCode).json({
     error: message,
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
   });
 }
 
@@ -60,5 +59,6 @@ export class ApiError extends Error {
     super(message);
     this.statusCode = statusCode;
     this.name = 'ApiError';
+    this.expose = true;
   }
 }

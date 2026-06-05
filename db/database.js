@@ -8,9 +8,11 @@ import jwt from 'jsonwebtoken';
 import {
   MysqlCompatConnection,
   ensureMysqlDatabase,
-  isLegacySharedMysqlDatabaseConfigured,
+  ensureMysqlSharedDatabase,
   isMysqlEnabled,
+  resolveMysqlConnectionTarget,
   resolveMysqlDatabaseName,
+  resolveMysqlTenantMode,
 } from './mysqlAdapter.js';
 import {
   DEFAULT_COUNTRY,
@@ -43,6 +45,7 @@ function createTenantError(message, statusCode = 400) {
   const error = new Error(message);
   error.status = statusCode;
   error.statusCode = statusCode;
+  error.expose = true;
   return error;
 }
 
@@ -78,15 +81,11 @@ const USE_MYSQL = isMysqlEnabled();
 console.log('[oasis-cloud] startup.database_mode', {
   mode: USE_MYSQL ? 'mysql' : 'sqlite',
   data_dir: process.env.OASIS_DATA_DIR || null,
-  mysql_tenant_prefix: USE_MYSQL ? (process.env.MYSQL_DATABASE_PREFIX || process.env.MYSQL_DATABASE || 'oasis_ems') : null,
+  mysql_tenant_mode: USE_MYSQL ? resolveMysqlTenantMode() : null,
+  mysql_database: USE_MYSQL && resolveMysqlTenantMode() === 'shared'
+    ? (process.env.MYSQL_DATABASE || null)
+    : null,
 });
-if (USE_MYSQL && isLegacySharedMysqlDatabaseConfigured()) {
-  console.warn(
-    '[oasis-cloud] MYSQL_DATABASE is set without MYSQL_DATABASE_PREFIX. '
-    + 'Each migrated school now gets its own MySQL database (prefix + school id). '
-    + 'Unset MYSQL_DATABASE or set MYSQL_DATABASE_PREFIX instead to avoid overwriting schools.',
-  );
-}
 
 function resolveTenantRegistryPath() {
   return path.join(resolveDataRoot(), 'tenant-registry.json');
@@ -162,8 +161,9 @@ export function registerTenantSchool(schoolId, meta = {}) {
   }
 
   const registry = readTenantRegistry();
+  const mysqlTarget = USE_MYSQL ? resolveMysqlConnectionTarget(normalizedSchoolId) : null;
   const storageTarget = USE_MYSQL
-    ? resolveMysqlDatabaseName(normalizedSchoolId)
+    ? (mysqlTarget.tablePrefix ? `${mysqlTarget.database}#${mysqlTarget.tablePrefix}` : mysqlTarget.database)
     : resolveTenantDatabasePath(normalizedSchoolId);
   const nextEntry = {
     school_id: normalizedSchoolId,
@@ -229,12 +229,19 @@ function resolveRequestSchoolId(req) {
   );
 }
 
-function createConnection(dbPath) {
+function createConnection(schoolId) {
+  const normalizedSchoolId = normalizeSchoolId(schoolId);
   if (USE_MYSQL) {
-    ensureMysqlDatabase(dbPath);
-    return new MysqlCompatConnection(dbPath);
+    const target = resolveMysqlConnectionTarget(normalizedSchoolId);
+    if (target.mode === 'database') {
+      ensureMysqlDatabase(target.database);
+    } else {
+      ensureMysqlSharedDatabase(target.database);
+    }
+    return new MysqlCompatConnection(target.database, { tablePrefix: target.tablePrefix });
   }
 
+  const dbPath = resolveTenantDatabasePath(normalizedSchoolId);
   const connection = new Database(dbPath);
   connection.pragma('journal_mode = WAL');
   connection.pragma('foreign_keys = ON');
@@ -285,13 +292,18 @@ function getTenantConnection(schoolId, { allowCreate = false } = {}) {
     throw createTenantError('School ID is required for cloud access.', 400);
   }
 
+  const mysqlTarget = USE_MYSQL ? resolveMysqlConnectionTarget(normalizedSchoolId) : null;
   const dbPath = USE_MYSQL
-    ? resolveMysqlDatabaseName(normalizedSchoolId)
+    ? mysqlTarget.database
     : resolveTenantDatabasePath(normalizedSchoolId);
+  const logTarget = USE_MYSQL && mysqlTarget.tablePrefix
+    ? `${mysqlTarget.database} (${mysqlTarget.tablePrefix}_*)`
+    : dbPath;
   console.log('[oasis-cloud] tenant.connection_resolve', {
     school_id: normalizedSchoolId,
     storage: USE_MYSQL ? 'mysql' : 'sqlite',
-    target: dbPath,
+    mysql_tenant_mode: mysqlTarget?.mode || null,
+    target: logTarget,
     allow_create: allowCreate === true,
   });
   if (!USE_MYSQL && !fs.existsSync(dbPath)) {
@@ -303,12 +315,12 @@ function getTenantConnection(schoolId, { allowCreate = false } = {}) {
 
   let connection = tenantConnections.get(normalizedSchoolId);
   if (!connection) {
-    connection = createConnection(dbPath);
+    connection = createConnection(normalizedSchoolId);
     tenantConnections.set(normalizedSchoolId, connection);
     console.log('[oasis-cloud] tenant.connection_created', {
       school_id: normalizedSchoolId,
       storage: USE_MYSQL ? 'mysql' : 'sqlite',
-      target: dbPath,
+      target: logTarget,
     });
   }
 
@@ -1116,11 +1128,16 @@ export function resetEducationData(nextCountry) {
 export function getDatabaseDebugInfo(targetSchoolId = null) {
   const normalizedSchoolId = normalizeSchoolId(targetSchoolId || getContextSchoolId());
   const dataRoot = resolveDataRoot();
+  const mysqlTarget = normalizedSchoolId && USE_MYSQL
+    ? resolveMysqlConnectionTarget(normalizedSchoolId)
+    : null;
   const info = {
     mode: USE_MYSQL ? 'mysql' : 'sqlite',
+    mysql_tenant_mode: USE_MYSQL ? resolveMysqlTenantMode() : null,
     data_root: USE_MYSQL ? null : dataRoot,
     requested_school_id: normalizedSchoolId || null,
-    mysql_database: normalizedSchoolId && USE_MYSQL ? resolveMysqlDatabaseName(normalizedSchoolId) : null,
+    mysql_database: mysqlTarget?.database || null,
+    mysql_table_prefix: mysqlTarget?.tablePrefix || null,
     sqlite_path: normalizedSchoolId && !USE_MYSQL ? resolveTenantDatabasePath(normalizedSchoolId) : null,
     registered_tenants: listRegisteredTenants(),
     tenant_count: 0,

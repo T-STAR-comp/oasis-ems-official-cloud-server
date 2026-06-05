@@ -1,7 +1,28 @@
 import MySql from 'sync-mysql';
 
+export const TENANT_TABLE_NAMES = [
+  'exam_subject_grading_profiles',
+  'exam_merge_sources',
+  'user_class_assignments',
+  'subscription_records',
+  'student_subjects',
+  'grade_criteria',
+  'exam_results',
+  'school_info',
+  'app_identity',
+  'students',
+  'subjects',
+  'classes',
+  'exams',
+  'users',
+];
+
 function toBooleanEnv(value) {
   return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+}
+
+function escapeRegex(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function getConfig(database) {
@@ -62,14 +83,46 @@ function mapInfo(result) {
   };
 }
 
+export function applyTablePrefix(sql, tablePrefix) {
+  if (!tablePrefix) {
+    return String(sql || '');
+  }
+
+  let next = String(sql || '');
+  const tables = [...TENANT_TABLE_NAMES].sort((left, right) => right.length - left.length);
+
+  tables.forEach((table) => {
+    const prefixed = `${tablePrefix}_${table}`;
+    next = next.replace(new RegExp(`\`${escapeRegex(table)}\``, 'gi'), `\`${prefixed}\``);
+    next = next.replace(new RegExp(`\\b${escapeRegex(table)}_old_fkfix\\b`, 'gi'), `${prefixed}_old_fkfix`);
+    next = next.replace(new RegExp(`\\b${escapeRegex(table)}_old\\b`, 'gi'), `${prefixed}_old`);
+    next = next.replace(new RegExp(`\\b${escapeRegex(table)}\\b`, 'gi'), prefixed);
+  });
+
+  return next;
+}
+
 export function isMysqlEnabled() {
   return toBooleanEnv(process.env.OASIS_USE_MYSQL);
+}
+
+export function resolveMysqlTenantMode() {
+  const explicit = String(process.env.OASIS_MYSQL_TENANT_MODE || '').trim().toLowerCase();
+  if (explicit === 'database' || explicit === 'shared') {
+    return explicit;
+  }
+
+  // cPanel and most shared hosts grant one MySQL database — isolate schools by table prefix.
+  if (String(process.env.MYSQL_DATABASE || '').trim()) {
+    return 'shared';
+  }
+
+  return 'database';
 }
 
 export function resolveMysqlDatabaseName(schoolId) {
   const prefix = String(
     process.env.MYSQL_DATABASE_PREFIX
-    || process.env.MYSQL_DATABASE
     || 'oasis_ems',
   ).trim().replace(/[^a-z0-9_]/gi, '_').replace(/^_+|_+$/g, '') || 'oasis_ems';
   const suffix = String(schoolId || 'default')
@@ -80,10 +133,38 @@ export function resolveMysqlDatabaseName(schoolId) {
   return `${prefix}_${suffix || 'default'}`;
 }
 
+export function resolveMysqlTablePrefix(schoolId) {
+  const suffix = String(schoolId || 'default')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'default';
+  return `ems_${suffix}`.slice(0, 40);
+}
+
+export function resolveMysqlConnectionTarget(schoolId) {
+  const mode = resolveMysqlTenantMode();
+  if (mode === 'shared') {
+    const database = String(process.env.MYSQL_DATABASE || '').trim();
+    if (!database) {
+      throw new Error('MYSQL_DATABASE is required when using shared MySQL tenant mode.');
+    }
+    return {
+      mode,
+      database,
+      tablePrefix: resolveMysqlTablePrefix(schoolId),
+    };
+  }
+
+  return {
+    mode,
+    database: resolveMysqlDatabaseName(schoolId),
+    tablePrefix: null,
+  };
+}
+
 export function isLegacySharedMysqlDatabaseConfigured() {
-  const explicitDatabase = String(process.env.MYSQL_DATABASE || '').trim();
-  const prefix = String(process.env.MYSQL_DATABASE_PREFIX || '').trim();
-  return Boolean(explicitDatabase && !prefix);
+  return resolveMysqlTenantMode() === 'shared';
 }
 
 export function ensureMysqlDatabase(databaseName) {
@@ -92,10 +173,32 @@ export function ensureMysqlDatabase(databaseName) {
   admin.dispose();
 }
 
+export function ensureMysqlSharedDatabase(databaseName) {
+  const connection = new MySql(getConfig(databaseName));
+  connection.query('SELECT 1 AS ok');
+  connection.dispose();
+}
+
+function resolvePhysicalTableName(tableName, tablePrefix) {
+  if (!tablePrefix) {
+    return tableName;
+  }
+  return `${tablePrefix}_${tableName}`;
+}
+
 export class MysqlCompatConnection {
-  constructor(databaseName) {
+  constructor(databaseName, { tablePrefix = null } = {}) {
     this.databaseName = databaseName;
+    this.tablePrefix = tablePrefix;
     this.connection = new MySql(getConfig(databaseName));
+  }
+
+  finalizeSql(sql) {
+    const normalized = normalizeStatement(sql);
+    if (!normalized) {
+      return '';
+    }
+    return applyTablePrefix(normalized, this.tablePrefix);
   }
 
   pragma() {}
@@ -106,10 +209,10 @@ export class MysqlCompatConnection {
 
   exec(sql) {
     splitStatements(sql).forEach((statement) => {
-      const normalized = normalizeStatement(statement);
-      if (normalized) {
+      const finalized = this.finalizeSql(statement);
+      if (finalized) {
         try {
-          this.connection.query(normalized);
+          this.connection.query(finalized);
         } catch (error) {
           if (error?.code !== 'ER_DUP_KEYNAME') {
             throw error;
@@ -122,11 +225,13 @@ export class MysqlCompatConnection {
   prepare(sql) {
     const connection = this.connection;
     const rawSql = String(sql || '').trim();
+    const tablePrefix = this.tablePrefix;
 
     if (/^PRAGMA\s+table_info\(([^)]+)\)/i.test(rawSql)) {
       const tableName = rawSql.match(/^PRAGMA\s+table_info\(([^)]+)\)/i)?.[1];
+      const physicalTable = resolvePhysicalTableName(tableName, tablePrefix);
       return {
-        all: () => mapRows(connection.query(`SHOW COLUMNS FROM ${quoteIdentifier(tableName)}`))
+        all: () => mapRows(connection.query(`SHOW COLUMNS FROM ${quoteIdentifier(physicalTable)}`))
           .map((row) => ({ name: row.Field, type: row.Type, notnull: row.Null === 'NO' ? 1 : 0 })),
         get: () => undefined,
         run: () => ({ changes: 0 }),
@@ -144,7 +249,8 @@ export class MysqlCompatConnection {
     if (/FROM\s+sqlite_master/i.test(rawSql)) {
       return {
         get: (tableName) => {
-          const rows = connection.query('SHOW TABLES LIKE ?', [tableName]);
+          const physicalTable = resolvePhysicalTableName(tableName, tablePrefix);
+          const rows = connection.query('SHOW TABLES LIKE ?', [physicalTable]);
           return rows.length ? { sql: '' } : undefined;
         },
         all: () => [],
@@ -152,11 +258,11 @@ export class MysqlCompatConnection {
       };
     }
 
-    const normalized = normalizeStatement(rawSql);
+    const finalized = this.finalizeSql(rawSql);
     return {
-      run: (...params) => mapInfo(connection.query(normalized, params)),
-      get: (...params) => mapRows(connection.query(normalized, params))[0],
-      all: (...params) => mapRows(connection.query(normalized, params)),
+      run: (...params) => mapInfo(connection.query(finalized, params)),
+      get: (...params) => mapRows(connection.query(finalized, params))[0],
+      all: (...params) => mapRows(connection.query(finalized, params)),
     };
   }
 
