@@ -1018,12 +1018,23 @@ function bootstrapCurrentDatabase() {
     CREATE INDEX IF NOT EXISTS idx_subscription_records_plan ON subscription_records(plan_kind);
     CREATE INDEX IF NOT EXISTS idx_subscription_records_charge_id ON subscription_records(charge_id);
     CREATE INDEX IF NOT EXISTS idx_subscription_records_school_id ON subscription_records(school_id);
-    CREATE INDEX IF NOT EXISTS idx_subscription_records_internal_uid ON subscription_records(internal_uid);
     CREATE INDEX IF NOT EXISTS idx_subscription_records_activation_code ON subscription_records(activation_code);
     CREATE INDEX IF NOT EXISTS idx_subscription_records_school_status ON subscription_records(school_id, status, online_features_enabled);
     CREATE INDEX IF NOT EXISTS idx_exam_results_exam_student ON exam_results(exam_id, student_id);
-    CREATE INDEX IF NOT EXISTS idx_classes_year_name ON classes(year, name);
   `);
+
+  if (USE_MYSQL) {
+    // MySQL cannot index full TEXT columns without a prefix length.
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_subscription_records_internal_uid ON subscription_records(internal_uid(191));
+      CREATE INDEX IF NOT EXISTS idx_classes_year ON classes(year);
+    `);
+  } else {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_subscription_records_internal_uid ON subscription_records(internal_uid);
+      CREATE INDEX IF NOT EXISTS idx_classes_year_name ON classes(year, name);
+    `);
+  }
 
   // Backfill enrollments for existing data: every student gets all compulsory subjects.
   db.exec(`

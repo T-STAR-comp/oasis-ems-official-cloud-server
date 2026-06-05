@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS subscription_records (
   currency VARCHAR(16),
   duration_days INT NOT NULL DEFAULT 0,
   online_features_enabled TINYINT NOT NULL DEFAULT 0,
-  internal_uid TEXT,
+  internal_uid VARCHAR(191),
   machine_hash TEXT,
   metadata LONGTEXT,
   activated_at DATETIME,
@@ -82,6 +82,10 @@ CREATE TABLE IF NOT EXISTS subscription_records (
   KEY idx_subscription_records_status (status),
   KEY idx_subscription_records_plan (plan_kind),
   KEY idx_subscription_records_charge_id (charge_id),
+  KEY idx_subscription_records_school_id (school_id),
+  KEY idx_subscription_records_internal_uid (internal_uid),
+  KEY idx_subscription_records_activation_code (activation_code),
+  KEY idx_subscription_records_school_status (school_id, status, online_features_enabled),
   CHECK (plan_kind IN ('trial', 'manual_offline', 'digital_online')),
   CHECK (status IN ('pending', 'pending_activation', 'active', 'expired', 'failed')),
   CHECK (online_features_enabled IN (0, 1))
@@ -94,7 +98,8 @@ CREATE TABLE IF NOT EXISTS classes (
   min_subjects INT NOT NULL DEFAULT 6,
   max_subjects INT NOT NULL DEFAULT 12,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_classes_year (year)
 );
 
 CREATE TABLE IF NOT EXISTS user_class_assignments (
@@ -183,6 +188,7 @@ CREATE TABLE IF NOT EXISTS exam_results (
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   KEY idx_results_exam (exam_id),
   KEY idx_results_student (student_id),
+  KEY idx_exam_results_exam_student (exam_id, student_id),
   FOREIGN KEY (exam_id) REFERENCES exams(id) ON DELETE CASCADE,
   FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
   FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
