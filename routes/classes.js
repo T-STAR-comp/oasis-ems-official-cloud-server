@@ -13,11 +13,24 @@ router.use(authenticateToken);
 router.get('/', (req, res) => {
   let classes = db.prepare(`
     SELECT c.*,
-      (SELECT COUNT(*) FROM students s WHERE s.class_id = c.id) as student_count,
-      (SELECT COUNT(*) FROM subjects sub WHERE sub.class_id = c.id) as subject_count,
-      (SELECT COUNT(*) FROM subjects sub WHERE sub.class_id = c.id AND sub.is_compulsory = 1) as compulsory_subject_count,
-      (SELECT COUNT(*) FROM subjects sub WHERE sub.class_id = c.id AND sub.is_compulsory = 0) as optional_subject_count
+      COALESCE(st.student_count, 0) AS student_count,
+      COALESCE(sub.subject_count, 0) AS subject_count,
+      COALESCE(sub.compulsory_subject_count, 0) AS compulsory_subject_count,
+      COALESCE(sub.optional_subject_count, 0) AS optional_subject_count
     FROM classes c
+    LEFT JOIN (
+      SELECT class_id, COUNT(*) AS student_count
+      FROM students
+      GROUP BY class_id
+    ) st ON st.class_id = c.id
+    LEFT JOIN (
+      SELECT class_id,
+        COUNT(*) AS subject_count,
+        SUM(CASE WHEN is_compulsory = 1 THEN 1 ELSE 0 END) AS compulsory_subject_count,
+        SUM(CASE WHEN is_compulsory = 0 THEN 1 ELSE 0 END) AS optional_subject_count
+      FROM subjects
+      GROUP BY class_id
+    ) sub ON sub.class_id = c.id
     ORDER BY c.year DESC, c.name ASC
   `).all();
   if (!isAdminUser(req.user)) {

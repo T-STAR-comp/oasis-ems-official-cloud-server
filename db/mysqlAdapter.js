@@ -67,11 +67,23 @@ export function isMysqlEnabled() {
 }
 
 export function resolveMysqlDatabaseName(schoolId) {
-  const explicitDatabase = String(process.env.MYSQL_DATABASE || '').trim();
-  if (explicitDatabase) return explicitDatabase;
-  const prefix = String(process.env.MYSQL_DATABASE_PREFIX || 'oasis_ems').trim();
-  const suffix = String(schoolId || 'default').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const prefix = String(
+    process.env.MYSQL_DATABASE_PREFIX
+    || process.env.MYSQL_DATABASE
+    || 'oasis_ems',
+  ).trim().replace(/[^a-z0-9_]/gi, '_').replace(/^_+|_+$/g, '') || 'oasis_ems';
+  const suffix = String(schoolId || 'default')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
   return `${prefix}_${suffix || 'default'}`;
+}
+
+export function isLegacySharedMysqlDatabaseConfigured() {
+  const explicitDatabase = String(process.env.MYSQL_DATABASE || '').trim();
+  const prefix = String(process.env.MYSQL_DATABASE_PREFIX || '').trim();
+  return Boolean(explicitDatabase && !prefix);
 }
 
 export function ensureMysqlDatabase(databaseName) {

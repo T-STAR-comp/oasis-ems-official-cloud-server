@@ -1,7 +1,9 @@
 import express from 'express';
 import db, {
+  getContextSchoolId,
   initializeDatabase,
   isFreshBootstrapState,
+  registerTenantSchool,
   resolveSchoolIdFromImportPayload,
   runWithSchoolContext,
 } from '../db/database.js';
@@ -71,17 +73,19 @@ function applyImportPayload(payload) {
 }
 
 function hasValidMigrationGrant(bootstrap) {
+  const tenantSchoolId = getContextSchoolId();
   const internalUid = String(bootstrap?.internal_uid || '').trim();
   const chargeId = String(bootstrap?.charge_id || '').trim();
   const activationCode = String(bootstrap?.activation_code || '').trim();
-  if (!internalUid && !chargeId && !activationCode) {
+  if (!tenantSchoolId || (!internalUid && !chargeId && !activationCode)) {
     return false;
   }
 
   const row = db.prepare(`
     SELECT id, status
     FROM subscription_records
-    WHERE online_features_enabled = 1
+    WHERE school_id = ?
+      AND online_features_enabled = 1
       AND status IN ('active', 'pending_activation')
       AND (
         (? != '' AND internal_uid = ?)
@@ -93,6 +97,7 @@ function hasValidMigrationGrant(bootstrap) {
       COALESCE(expires_at, created_at) DESC
     LIMIT 1
   `).get(
+    tenantSchoolId,
     internalUid,
     internalUid,
     chargeId,
@@ -102,6 +107,15 @@ function hasValidMigrationGrant(bootstrap) {
   );
 
   return Boolean(row);
+}
+
+function finalizeImport(schoolId, data) {
+  applyImportPayload(data);
+  const schoolName = Array.isArray(data?.school_info) ? data.school_info[0]?.name : undefined;
+  registerTenantSchool(schoolId, {
+    name: schoolName || schoolId,
+    source: 'migration',
+  });
 }
 
 router.get('/export', authenticateToken, (req, res) => {
@@ -131,7 +145,7 @@ router.post('/import-bootstrap', (req, res) => {
     initializeDatabase(schoolId);
 
     if (hasValidMigrationGrant(payload.bootstrap)) {
-      applyImportPayload(data);
+      finalizeImport(schoolId, data);
       return res.json({
         message: isFreshBootstrapState() ? 'Bootstrap import completed' : 'Migration import completed',
         school_id: schoolId,
@@ -141,7 +155,7 @@ router.post('/import-bootstrap', (req, res) => {
     if (!isFreshBootstrapState()) {
       return authenticateToken(req, res, () => {
         if (!ensureAdmin(req, res)) return;
-        applyImportPayload(data);
+        finalizeImport(schoolId, data);
         return res.json({ message: 'Migration import completed', school_id: schoolId });
       });
     }

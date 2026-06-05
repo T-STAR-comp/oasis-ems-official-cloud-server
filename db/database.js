@@ -8,6 +8,7 @@ import jwt from 'jsonwebtoken';
 import {
   MysqlCompatConnection,
   ensureMysqlDatabase,
+  isLegacySharedMysqlDatabaseConfigured,
   isMysqlEnabled,
   resolveMysqlDatabaseName,
 } from './mysqlAdapter.js';
@@ -77,13 +78,129 @@ const USE_MYSQL = isMysqlEnabled();
 console.log('[oasis-cloud] startup.database_mode', {
   mode: USE_MYSQL ? 'mysql' : 'sqlite',
   data_dir: process.env.OASIS_DATA_DIR || null,
+  mysql_tenant_prefix: USE_MYSQL ? (process.env.MYSQL_DATABASE_PREFIX || process.env.MYSQL_DATABASE || 'oasis_ems') : null,
 });
+if (USE_MYSQL && isLegacySharedMysqlDatabaseConfigured()) {
+  console.warn(
+    '[oasis-cloud] MYSQL_DATABASE is set without MYSQL_DATABASE_PREFIX. '
+    + 'Each migrated school now gets its own MySQL database (prefix + school id). '
+    + 'Unset MYSQL_DATABASE or set MYSQL_DATABASE_PREFIX instead to avoid overwriting schools.',
+  );
+}
+
+function resolveTenantRegistryPath() {
+  return path.join(resolveDataRoot(), 'tenant-registry.json');
+}
+
+function readTenantRegistry() {
+  const registryPath = resolveTenantRegistryPath();
+  try {
+    if (fs.existsSync(registryPath)) {
+      const parsed = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+      if (Array.isArray(parsed?.schools)) {
+        return parsed;
+      }
+    }
+  } catch (_error) {
+    // Fall back to an empty registry.
+  }
+  return { schools: [], updated_at: null };
+}
+
+function writeTenantRegistry(registry) {
+  const registryPath = resolveTenantRegistryPath();
+  const payload = {
+    ...registry,
+    updated_at: new Date().toISOString(),
+  };
+  fs.writeFileSync(registryPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  return payload;
+}
+
+function listSqliteTenantIds() {
+  const schoolsRoot = path.join(resolveDataRoot(), 'schools');
+  if (!fs.existsSync(schoolsRoot)) {
+    return [];
+  }
+  return fs.readdirSync(schoolsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .filter((entry) => fs.existsSync(path.join(schoolsRoot, entry.name, 'school.db')))
+    .map((entry) => entry.name);
+}
+
+export function listRegisteredTenants() {
+  const registry = readTenantRegistry();
+  const knownIds = new Set(registry.schools.map((entry) => normalizeSchoolId(entry.school_id)));
+
+  if (!USE_MYSQL) {
+    listSqliteTenantIds().forEach((dirName) => {
+      const schoolId = normalizeSchoolId(dirName);
+      if (!knownIds.has(schoolId)) {
+        registry.schools.push({
+          school_id: schoolId,
+          storage: 'sqlite',
+          database: resolveTenantDatabasePath(schoolId),
+          source: 'discovered',
+        });
+        knownIds.add(schoolId);
+      }
+    });
+  }
+
+  return registry.schools
+    .map((entry) => ({
+      ...entry,
+      school_id: normalizeSchoolId(entry.school_id),
+    }))
+    .sort((left, right) => String(left.school_id).localeCompare(String(right.school_id)));
+}
+
+export function registerTenantSchool(schoolId, meta = {}) {
+  const normalizedSchoolId = normalizeSchoolId(schoolId);
+  if (!normalizedSchoolId) {
+    return null;
+  }
+
+  const registry = readTenantRegistry();
+  const storageTarget = USE_MYSQL
+    ? resolveMysqlDatabaseName(normalizedSchoolId)
+    : resolveTenantDatabasePath(normalizedSchoolId);
+  const nextEntry = {
+    school_id: normalizedSchoolId,
+    name: meta.name || normalizedSchoolId,
+    storage: USE_MYSQL ? 'mysql' : 'sqlite',
+    database: storageTarget,
+    updated_at: new Date().toISOString(),
+    ...meta,
+  };
+
+  const existingIndex = registry.schools.findIndex(
+    (entry) => normalizeSchoolId(entry.school_id) === normalizedSchoolId,
+  );
+  if (existingIndex >= 0) {
+    registry.schools[existingIndex] = {
+      ...registry.schools[existingIndex],
+      ...nextEntry,
+    };
+  } else {
+    registry.schools.push(nextEntry);
+  }
+
+  writeTenantRegistry(registry);
+  console.log('[oasis-cloud] tenant.registered', {
+    school_id: normalizedSchoolId,
+    storage: nextEntry.storage,
+    database: nextEntry.database,
+    source: meta.source || 'unknown',
+  });
+  return nextEntry;
+}
 
 function getContextStore() {
   return tenantContext.getStore() || null;
 }
 
-function getContextSchoolId() {
+export function getContextSchoolId() {
   return normalizeSchoolId(getContextStore()?.schoolId);
 }
 
@@ -888,6 +1005,12 @@ function bootstrapCurrentDatabase() {
     CREATE INDEX IF NOT EXISTS idx_subscription_records_status ON subscription_records(status);
     CREATE INDEX IF NOT EXISTS idx_subscription_records_plan ON subscription_records(plan_kind);
     CREATE INDEX IF NOT EXISTS idx_subscription_records_charge_id ON subscription_records(charge_id);
+    CREATE INDEX IF NOT EXISTS idx_subscription_records_school_id ON subscription_records(school_id);
+    CREATE INDEX IF NOT EXISTS idx_subscription_records_internal_uid ON subscription_records(internal_uid);
+    CREATE INDEX IF NOT EXISTS idx_subscription_records_activation_code ON subscription_records(activation_code);
+    CREATE INDEX IF NOT EXISTS idx_subscription_records_school_status ON subscription_records(school_id, status, online_features_enabled);
+    CREATE INDEX IF NOT EXISTS idx_exam_results_exam_student ON exam_results(exam_id, student_id);
+    CREATE INDEX IF NOT EXISTS idx_classes_year_name ON classes(year, name);
   `);
 
   // Backfill enrollments for existing data: every student gets all compulsory subjects.
@@ -900,7 +1023,11 @@ function bootstrapCurrentDatabase() {
   `);
 
   ensureInternalUid();
-  ensureSchoolIdentity();
+  const identity = ensureSchoolIdentity();
+  registerTenantSchool(identity.schoolId, {
+    name: db.prepare('SELECT name FROM school_info WHERE id = 1').get()?.name || identity.schoolId,
+    source: 'bootstrap',
+  });
   console.log('✅ Database initialized successfully');
 }
 
@@ -995,18 +1122,16 @@ export function getDatabaseDebugInfo(targetSchoolId = null) {
     requested_school_id: normalizedSchoolId || null,
     mysql_database: normalizedSchoolId && USE_MYSQL ? resolveMysqlDatabaseName(normalizedSchoolId) : null,
     sqlite_path: normalizedSchoolId && !USE_MYSQL ? resolveTenantDatabasePath(normalizedSchoolId) : null,
+    registered_tenants: listRegisteredTenants(),
+    tenant_count: 0,
     known_sqlite_tenants: [],
     snapshot: null,
   };
+  info.tenant_count = info.registered_tenants.length;
 
   if (!USE_MYSQL) {
-    const schoolsRoot = path.join(dataRoot, 'schools');
     try {
-      info.known_sqlite_tenants = fs.existsSync(schoolsRoot)
-        ? fs.readdirSync(schoolsRoot, { withFileTypes: true })
-          .filter((entry) => entry.isDirectory())
-          .map((entry) => entry.name)
-        : [];
+      info.known_sqlite_tenants = listSqliteTenantIds();
     } catch (error) {
       info.known_sqlite_tenants_error = error.message || 'Failed to list tenant directories.';
     }
