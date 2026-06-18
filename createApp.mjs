@@ -236,6 +236,7 @@ export async function mountFullStack(app) {
   const licenseRoutes = (await import('./routes/license.js')).default;
   const systemRoutes = (await import('./routes/system.js')).default;
   const analyticsRoutes = (await import('./routes/analytics.js')).default;
+  const promotionRoutes = (await import('./routes/promotion.js')).default;
   const debugRoutes = (await import('./routes/debug.js')).default;
   const { errorHandler } = await import('./middleware/errorHandler.js');
 
@@ -269,6 +270,7 @@ export async function mountFullStack(app) {
   app.use('/api/license', licenseRoutes);
   app.use('/api/system', systemRoutes);
   app.use('/api/analytics', analyticsRoutes);
+  app.use('/api/promotion', promotionRoutes);
   app.use('/api/debug', debugRoutes);
 
   app.use((req, res, next) => {

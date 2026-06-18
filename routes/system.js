@@ -32,6 +32,8 @@ const TABLES = [
   'user_class_assignments',
   'exam_subject_grading_profiles',
   'exam_merge_sources',
+  'promotion_criteria',
+  'promotion_actions',
   'app_identity',
 ];
 

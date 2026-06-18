@@ -998,6 +998,43 @@ function bootstrapCurrentDatabase() {
     )
   `);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS promotion_criteria (
+      class_id TEXT PRIMARY KEY,
+      rule_mode TEXT NOT NULL DEFAULT 'pass_all_exams' CHECK(rule_mode IN (
+        'auto_all',
+        'pass_all_exams',
+        'pass_selected_exams',
+        'average_midterm_endterm',
+        'average_endterm_only'
+      )),
+      next_class_id TEXT,
+      academic_year TEXT,
+      minimum_average REAL NOT NULL DEFAULT 50,
+      minimum_pass_score REAL NOT NULL DEFAULT 50,
+      selected_exam_ids TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE,
+      FOREIGN KEY (next_class_id) REFERENCES classes(id) ON DELETE SET NULL
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS promotion_actions (
+      id TEXT PRIMARY KEY,
+      action_type TEXT NOT NULL CHECK(action_type IN ('apply_criteria', 'manual_promote', 'manual_demote')),
+      class_id TEXT,
+      academic_year TEXT,
+      criteria_snapshot TEXT,
+      student_moves TEXT NOT NULL,
+      performed_by TEXT,
+      undone INTEGER NOT NULL DEFAULT 0 CHECK(undone IN (0, 1)),
+      undone_at DATETIME,
+      undone_by TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
   seedGradeCriteriaForCountry(country);
 
   // Create indexes for better performance
@@ -1021,6 +1058,8 @@ function bootstrapCurrentDatabase() {
     CREATE INDEX IF NOT EXISTS idx_subscription_records_activation_code ON subscription_records(activation_code);
     CREATE INDEX IF NOT EXISTS idx_subscription_records_school_status ON subscription_records(school_id, status, online_features_enabled);
     CREATE INDEX IF NOT EXISTS idx_exam_results_exam_student ON exam_results(exam_id, student_id);
+    CREATE INDEX IF NOT EXISTS idx_promotion_actions_created ON promotion_actions(created_at);
+    CREATE INDEX IF NOT EXISTS idx_promotion_criteria_next_class ON promotion_criteria(next_class_id);
   `);
 
   if (USE_MYSQL) {
