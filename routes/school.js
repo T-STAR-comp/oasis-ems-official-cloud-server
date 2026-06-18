@@ -3,10 +3,16 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import db, { resetEducationData } from '../db/database.js';
+import db, { getContextSchoolId, resetEducationData } from '../db/database.js';
 import { authenticateToken, getAssignedClassIds, isAdminUser, requireRole } from '../middleware/auth.js';
 import { getGradingSystemsForCountry, isSupportedGradingSystem, normalizeCountry, SUPPORTED_COUNTRIES } from '../utils/education.js';
 import { DEFAULT_REPORT_CARD_DESIGN, normalizeReportCardDesign } from '../utils/reportCardDesign.js';
+import {
+  buildSchoolLogoFilename,
+  deleteSchoolLogoFiles,
+  resolveStoredLogoPath,
+  resolveUploadsRoot,
+} from '../utils/schoolLogo.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -47,31 +53,21 @@ function ensureAllowedGradingSystem(system, res) {
 }
 
 // Configure multer for logo uploads
-const uploadsRoot = process.env.OASIS_UPLOADS_DIR
-  ? path.resolve(process.env.OASIS_UPLOADS_DIR)
-  : path.join(__dirname, '..', 'uploads');
+const uploadsRoot = resolveUploadsRoot(__dirname);
 const logoDir = path.join(uploadsRoot, 'logos');
 if (!fs.existsSync(logoDir)) {
   fs.mkdirSync(logoDir, { recursive: true });
 }
 
-function resolveStoredLogoPath(storedPath) {
-  const cleanPath = String(storedPath || '').replace(/^\/+/, '');
-  if (!cleanPath) return null;
-  if (cleanPath.startsWith('uploads/')) {
-    return path.join(uploadsRoot, cleanPath.slice('uploads/'.length));
-  }
-  return path.join(__dirname, '..', cleanPath);
-}
-
 const logoStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
+  destination: (_req, _file, cb) => {
     cb(null, logoDir);
   },
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, 'school-logo' + ext);
-  }
+    const schoolId = getContextSchoolId();
+    const ext = path.extname(file.originalname) || '.png';
+    cb(null, buildSchoolLogoFilename(schoolId, ext));
+  },
 });
 
 const logoFilter = (req, file, cb) => {
@@ -273,10 +269,11 @@ router.post('/logo', authenticateToken, requireRole('admin', 'secretary'), uploa
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    // Delete old logo if it exists and is different
     const currentInfo = db.prepare('SELECT logo FROM school_info WHERE id = 1').get();
+    const schoolId = getContextSchoolId();
+    deleteSchoolLogoFiles(schoolId, uploadsRoot, { exceptFilename: req.file.filename });
     if (currentInfo.logo) {
-      const oldLogoPath = resolveStoredLogoPath(currentInfo.logo);
+      const oldLogoPath = resolveStoredLogoPath(currentInfo.logo, uploadsRoot);
       if (oldLogoPath && fs.existsSync(oldLogoPath) && oldLogoPath !== req.file.path) {
         try {
           fs.unlinkSync(oldLogoPath);
@@ -304,13 +301,15 @@ router.post('/logo', authenticateToken, requireRole('admin', 'secretary'), uploa
 router.delete('/logo', authenticateToken, requireRole('admin'), (req, res, next) => {
   try {
     const currentInfo = db.prepare('SELECT logo FROM school_info WHERE id = 1').get();
+    const schoolId = getContextSchoolId();
     
     if (currentInfo.logo) {
-      const logoPath = resolveStoredLogoPath(currentInfo.logo);
+      const logoPath = resolveStoredLogoPath(currentInfo.logo, uploadsRoot);
       if (logoPath && fs.existsSync(logoPath)) {
         fs.unlinkSync(logoPath);
       }
     }
+    deleteSchoolLogoFiles(schoolId, uploadsRoot);
 
     db.prepare('UPDATE school_info SET logo = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = 1').run();
 

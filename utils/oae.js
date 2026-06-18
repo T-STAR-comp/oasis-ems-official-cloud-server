@@ -136,7 +136,7 @@ function buildSchoolPortfolio({ db, allowedClassIds, calculateStudentResults }) 
       SELECT id, class_id, name, term, year, grading_system, created_at
       FROM exams
       WHERE class_id = ?
-      ORDER BY datetime(created_at) DESC, rowid DESC
+      ORDER BY created_at DESC
       LIMIT 1
     `).get(classRoom.id);
 
@@ -188,8 +188,8 @@ function resolveExamWindow(db, exam) {
     SELECT id, name, term, year, grading_system, created_at
     FROM exams
     WHERE class_id = ?
-      AND datetime(created_at) <= datetime(?)
-    ORDER BY datetime(created_at) DESC, rowid DESC
+      AND created_at <= ?
+    ORDER BY created_at DESC
     LIMIT 4
   `).all(exam.class_id, exam.created_at);
 
@@ -273,14 +273,25 @@ export function readOaeState(db) {
 }
 
 export function updateOaeState(db, { enabled, activatedBy }) {
-  db.prepare(`
-    UPDATE school_info
-    SET oae_enabled = ?,
-        oae_activated_at = CASE WHEN ? = 1 THEN COALESCE(oae_activated_at, CURRENT_TIMESTAMP) ELSE NULL END,
-        oae_activated_by = CASE WHEN ? = 1 THEN ? ELSE NULL END,
-        updated_at = CURRENT_TIMESTAMP
-    WHERE id = 1
-  `).run(enabled ? 1 : 0, enabled ? 1 : 0, enabled ? 1 : 0, enabled ? activatedBy || null : null);
+  if (enabled) {
+    db.prepare(`
+      UPDATE school_info
+      SET oae_enabled = 1,
+          oae_activated_at = COALESCE(oae_activated_at, CURRENT_TIMESTAMP),
+          oae_activated_by = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1
+    `).run(activatedBy || null);
+  } else {
+    db.prepare(`
+      UPDATE school_info
+      SET oae_enabled = 0,
+          oae_activated_at = NULL,
+          oae_activated_by = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1
+    `).run();
+  }
 
   return readOaeState(db);
 }
@@ -328,7 +339,7 @@ export function resolveAnalyticsExam({ db, user, examId, classId, isAdminUser, g
     query += ` WHERE ${filters.join(' AND ')}`;
   }
 
-  query += ' ORDER BY datetime(e.created_at) DESC, e.rowid DESC LIMIT 1';
+  query += ' ORDER BY e.created_at DESC LIMIT 1';
 
   return {
     exam: db.prepare(query).get(...params) || null,

@@ -1,4 +1,7 @@
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import db, {
   getContextSchoolId,
   initializeDatabase,
@@ -8,6 +11,11 @@ import db, {
   runWithSchoolContext,
 } from '../db/database.js';
 import { authenticateToken, isAdminUser } from '../middleware/auth.js';
+import { persistSchoolLogoFile, resolveUploadsRoot } from '../utils/schoolLogo.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const uploadsRoot = resolveUploadsRoot(__dirname);
 
 const router = express.Router();
 
@@ -109,8 +117,28 @@ function hasValidMigrationGrant(bootstrap) {
   return Boolean(row);
 }
 
-function finalizeImport(schoolId, data) {
+function finalizeImport(schoolId, data, bootstrap = {}) {
   applyImportPayload(data);
+  const logoAsset = bootstrap?.assets?.logo;
+  if (logoAsset?.base64) {
+    try {
+      const ext = String(logoAsset.ext || '.png');
+      const stored = persistSchoolLogoFile(
+        schoolId,
+        Buffer.from(String(logoAsset.base64), 'base64'),
+        ext,
+        uploadsRoot,
+      );
+      db.prepare('UPDATE school_info SET logo = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1')
+        .run(stored.storedPath);
+    } catch (error) {
+      console.error('[oasis-cloud] migration.logo_persist_failed', {
+        school_id: schoolId,
+        message: error?.message || 'unknown',
+      });
+    }
+  }
+
   const schoolName = Array.isArray(data?.school_info) ? data.school_info[0]?.name : undefined;
   registerTenantSchool(schoolId, {
     name: schoolName || schoolId,
@@ -145,7 +173,7 @@ router.post('/import-bootstrap', (req, res) => {
     initializeDatabase(schoolId);
 
     if (hasValidMigrationGrant(payload.bootstrap)) {
-      finalizeImport(schoolId, data);
+      finalizeImport(schoolId, data, payload.bootstrap);
       return res.json({
         message: isFreshBootstrapState() ? 'Bootstrap import completed' : 'Migration import completed',
         school_id: schoolId,
@@ -155,7 +183,7 @@ router.post('/import-bootstrap', (req, res) => {
     if (!isFreshBootstrapState()) {
       return authenticateToken(req, res, () => {
         if (!ensureAdmin(req, res)) return;
-        finalizeImport(schoolId, data);
+        finalizeImport(schoolId, data, payload.bootstrap);
         return res.json({ message: 'Migration import completed', school_id: schoolId });
       });
     }
