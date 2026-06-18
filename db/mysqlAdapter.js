@@ -59,7 +59,7 @@ function normalizeStatement(sql) {
   next = next
     .replace(/\bAUTOINCREMENT\b/gi, 'AUTO_INCREMENT')
     .replace(/\bCREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\b/gi, 'CREATE INDEX')
-    .replace(/\b(id|user_id|class_id|student_id|subject_id|exam_id|source_exam_id|school_id|username|email|country|plan_kind|status|activation_code|charge_id|payment_method|payment_channel|currency|type|role|gender|grading_system|lock_status|system|internal_uid)\s+TEXT\b/gi, '$1 VARCHAR(191)')
+    .replace(/\b(id|user_id|class_id|next_class_id|student_id|subject_id|exam_id|source_exam_id|school_id|username|email|country|plan_kind|status|activation_code|charge_id|payment_method|payment_channel|currency|type|role|gender|grading_system|lock_status|system|internal_uid)\s+TEXT\b/gi, '$1 VARCHAR(191)')
     .replace(/\bINTEGER\s+PRIMARY\s+KEY\s+AUTO_INCREMENT\b/gi, 'INT PRIMARY KEY AUTO_INCREMENT')
     .replace(/\bINSERT\s+OR\s+IGNORE\b/gi, 'INSERT IGNORE')
     .replace(/\bdatetime\(([^)]+)\)/gi, '$1')
