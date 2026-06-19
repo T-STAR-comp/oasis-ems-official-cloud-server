@@ -87,36 +87,51 @@ function hasValidMigrationGrant(bootstrap) {
   const internalUid = String(bootstrap?.internal_uid || '').trim();
   const chargeId = String(bootstrap?.charge_id || '').trim();
   const activationCode = String(bootstrap?.activation_code || '').trim();
-  if (!tenantSchoolId || (!internalUid && !chargeId && !activationCode)) {
+  if (!tenantSchoolId) {
     return false;
   }
 
-  const row = db.prepare(`
-    SELECT id, status
+  if (internalUid || chargeId || activationCode) {
+    const row = db.prepare(`
+      SELECT id, status
+      FROM subscription_records
+      WHERE school_id = ?
+        AND online_features_enabled = 1
+        AND status IN ('active', 'pending_activation')
+        AND (
+          (? != '' AND internal_uid = ?)
+          OR (? != '' AND charge_id = ?)
+          OR (? != '' AND activation_code = ?)
+        )
+      ORDER BY
+        CASE status WHEN 'active' THEN 0 ELSE 1 END,
+        COALESCE(expires_at, created_at) DESC
+      LIMIT 1
+    `).get(
+      tenantSchoolId,
+      internalUid,
+      internalUid,
+      chargeId,
+      chargeId,
+      activationCode,
+      activationCode,
+    );
+
+    if (row) {
+      return true;
+    }
+  }
+
+  const activeForSchool = db.prepare(`
+    SELECT id
     FROM subscription_records
     WHERE school_id = ?
       AND online_features_enabled = 1
       AND status IN ('active', 'pending_activation')
-      AND (
-        (? != '' AND internal_uid = ?)
-        OR (? != '' AND charge_id = ?)
-        OR (? != '' AND activation_code = ?)
-      )
-    ORDER BY
-      CASE status WHEN 'active' THEN 0 ELSE 1 END,
-      COALESCE(expires_at, created_at) DESC
     LIMIT 1
-  `).get(
-    tenantSchoolId,
-    internalUid,
-    internalUid,
-    chargeId,
-    chargeId,
-    activationCode,
-    activationCode
-  );
+  `).get(tenantSchoolId);
 
-  return Boolean(row);
+  return Boolean(activeForSchool);
 }
 
 function finalizeImport(schoolId, data, bootstrap = {}) {
@@ -174,19 +189,31 @@ router.post('/import-bootstrap', (req, res) => {
   return runWithSchoolContext(schoolId, () => {
     initializeDatabase(schoolId);
 
-    if (hasValidMigrationGrant(payload.bootstrap)) {
-      finalizeImport(schoolId, data, payload.bootstrap);
-      return res.json({
-        message: isFreshBootstrapState() ? 'Bootstrap import completed' : 'Migration import completed',
-        school_id: schoolId,
-      });
-    }
-
     if (!isFreshBootstrapState()) {
+      const authHeader = String(req.headers.authorization || '').trim();
+      if (!authHeader) {
+        return res.status(409).json({
+          error: 'This school has already been migrated to the cloud. Switch to online mode and sign in with your School ID.',
+          already_migrated: true,
+          school_id: schoolId,
+        });
+      }
+
       return authenticateToken(req, res, () => {
         if (!ensureAdmin(req, res)) return;
         finalizeImport(schoolId, data, payload.bootstrap);
-        return res.json({ message: 'Migration import completed', school_id: schoolId });
+        return res.json({
+          message: 'Cloud data refreshed from your local export.',
+          school_id: schoolId,
+        });
+      });
+    }
+
+    if (hasValidMigrationGrant(payload.bootstrap)) {
+      finalizeImport(schoolId, data, payload.bootstrap);
+      return res.json({
+        message: 'Bootstrap import completed',
+        school_id: schoolId,
       });
     }
 

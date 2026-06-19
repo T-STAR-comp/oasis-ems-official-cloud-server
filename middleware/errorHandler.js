@@ -31,10 +31,16 @@ export function errorHandler(err, req, res, next) {
 
   // Multer file upload errors
   if (err.code === 'LIMIT_FILE_SIZE') {
-    return res.status(400).json({ error: 'File too large. Maximum size is 10MB' });
+    return res.status(400).json({ error: 'File too large. Maximum size is 5MB' });
   }
   if (err.code === 'LIMIT_UNEXPECTED_FILE') {
     return res.status(400).json({ error: 'Unexpected file field' });
+  }
+  if (err.code === 'ENOENT' || err.code === 'EACCES' || err.code === 'EPERM') {
+    return res.status(503).json({ error: 'Logo upload storage is not writable. Contact your administrator.' });
+  }
+  if (String(err.message || '').includes('Invalid file type')) {
+    return res.status(400).json({ error: err.message });
   }
 
   // JWT errors
