@@ -8,6 +8,7 @@ import db from '../db/database.js';
 import { authenticateToken, ensureClassAccess } from '../middleware/auth.js';
 import { rankStudentsByExam, getGrade, formatRank, calculateStudentResults, getGradeCriteria } from '../utils/grading.js';
 import { renderStudentReportCardPage } from '../utils/reportCardPdf.js';
+import { renderPaginatedClassResultsPdf } from '../utils/classResultsPdf.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1110,105 +1111,15 @@ router.get('/class/:classId/exam/:examId/pdf', (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="${exam.class_name}_${exam.name}_results.pdf"`);
 
   doc.pipe(res);
-
-  const pageWidth = doc.page.width;
-  const contentX = 20;
-  const contentWidth = pageWidth - 40;
-
-  let y = 20;
-
-  // Header block
-  drawCard(doc, contentX, y, contentWidth, 92);
-  if (logoPath) {
-    doc.image(logoPath, contentX + 14, y + 12, { fit: [52, 52] });
-  }
-  doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(18)
-    .text(schoolInfo.name || 'SCHOOL', contentX + 78, y + 16, { width: contentWidth - 92 });
-  doc.fillColor('#5b6b80').font('Helvetica').fontSize(11)
-    .text(`${exam.class_name} - ${exam.name}`, contentX + 78, y + 44, { width: contentWidth - 92 });
-  doc.text('', contentX + 78, y + 64, { width: contentWidth - 92 });
-
-  y += 106;
-
-  // Table setup
-  const rankW = 58;
-  const nameW = 190;
-  const totalW = 70;
-  const avgW = 65;
-  const finalW = 70; // points or grade
-  const subjectW = Math.max(46, Math.min(80, (contentWidth - rankW - nameW - totalW - avgW - finalW) / Math.max(1, subjects.length)));
-
-  const columns = [
-    { label: 'Rank', width: rankW, align: 'left' },
-    { label: 'Student Name', width: nameW, align: 'left' },
-    ...subjects.map((s) => ({ label: s.code || s.name.toUpperCase().slice(0, 5), width: subjectW, align: 'center' })),
-    { label: 'Total', width: totalW, align: 'center' },
-    { label: 'Avg', width: avgW, align: 'center' },
-    { label: exam.grading_system === 'msce' ? 'Points' : 'Grade', width: finalW, align: 'center' }
-  ];
-
-  const tableX = contentX;
-  const rowHeight = 34;
-  const headerHeight = 36;
-  const tableWidth = columns.reduce((sum, c) => sum + c.width, 0);
-
-  drawCard(doc, contentX, y, contentWidth, headerHeight + rowHeight * Math.max(rankings.length, 1) + 14);
-  drawRowBackground(doc, tableX, y + 8, tableWidth, headerHeight, '#f4f7fc');
-
-  let x = tableX;
-  doc.fillColor('#5b6b80').font('Helvetica-Bold').fontSize(10);
-  columns.forEach((column) => {
-    doc.text(column.label, x + 4, y + 22, {
-      width: column.width - 8,
-      align: column.align
-    });
-    x += column.width;
+  renderPaginatedClassResultsPdf(doc, {
+    schoolInfo,
+    exam,
+    subjects,
+    rankings,
+    logoPath,
+    examId,
+    getOverallGradeWithEnglishRule,
   });
-
-  rankings.forEach((r, index) => {
-    const rowY = y + 8 + headerHeight + rowHeight * index;
-    let rowColor = index % 2 === 0 ? '#ffffff' : '#fafbfd';
-    if (r.rank === 1) rowColor = '#fff7e8';
-    if (r.rank === 2) rowColor = '#f7f8fb';
-    if (r.rank === 3) rowColor = '#fcf4ef';
-
-    drawRowBackground(doc, tableX, rowY, tableWidth, rowHeight, rowColor);
-    doc.strokeColor('#e2e8f0').lineWidth(0.5).moveTo(tableX, rowY).lineTo(tableX + tableWidth, rowY).stroke();
-
-    const studentResults = calculateStudentResults(examId, r.student.id).results;
-    const resultMap = new Map(studentResults.map((res) => [res.subject_id, res.score]));
-    const overallGrade = getOverallGradeWithEnglishRule(exam, r.averageScore, studentResults);
-    const totalPoints = r.totalPoints ?? studentResults.reduce((sum, row) => {
-      const info = getGrade(Number(row.score), 'msce');
-      return sum + (info.points || 0);
-    }, 0);
-
-    const values = [
-      formatRank(r.rank),
-      r.student.name,
-      ...subjects.map((s) => {
-        const score = resultMap.get(s.id);
-        return score !== undefined ? formatWholeNumber(score) : '-';
-      }),
-      Number.isFinite(Number(r.totalScore)) ? formatWholeNumber(r.totalScore) : '-',
-      Number.isFinite(r.averageScore) ? formatWholeNumber(r.averageScore) : '-',
-      exam.grading_system === 'msce' ? formatPoints(totalPoints) : String(overallGrade.grade)
-    ];
-
-    x = tableX;
-    values.forEach((value, colIndex) => {
-      const isFinalCol = colIndex === values.length - 1;
-      const textColor = exam.grading_system === 'msce' && isFinalCol ? '#d97706' : '#0f172a';
-      const font = colIndex === 0 || colIndex === 1 || colIndex >= values.length - 3 ? 'Helvetica-Bold' : 'Helvetica';
-
-      doc.fillColor(textColor).font(font).fontSize(9.5).text(String(value), x + 4, rowY + 11, {
-        width: columns[colIndex].width - 8,
-        align: columns[colIndex].align
-      });
-      x += columns[colIndex].width;
-    });
-  });
-
   doc.end();
 });
 
