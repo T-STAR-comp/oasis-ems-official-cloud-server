@@ -1,5 +1,5 @@
 import PDFDocument from 'pdfkit';
-import archiver from 'archiver';
+import { ZipArchive } from 'archiver';
 import { PassThrough } from 'node:stream';
 import { renderStudentReportCardPage } from './reportCardPdf.js';
 
@@ -20,7 +20,7 @@ function sanitizeFilename(value) {
 }
 
 export async function buildStudentReportsZip({ rankings, exam, schoolInfo, formTeacherName, logoPath, criteria, subjectTeacherMap, buildReportContext }) {
-  const archive = archiver('zip', { zlib: { level: 9 } });
+  const archive = new ZipArchive({ zlib: { level: 9 } });
   const passThrough = new PassThrough();
   archive.pipe(passThrough);
 
