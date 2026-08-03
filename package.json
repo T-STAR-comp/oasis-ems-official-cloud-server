@@ -10,6 +10,7 @@
     "start:cpanel": "node passenger-boot.cjs"
   },
   "dependencies": {
+    "archiver": "^8.0.0",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^12.6.2",
     "cors": "^2.8.5",

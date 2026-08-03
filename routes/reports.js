@@ -9,6 +9,7 @@ import { authenticateToken, ensureClassAccess } from '../middleware/auth.js';
 import { rankStudentsByExam, getGrade, formatRank, calculateStudentResults, getGradeCriteria } from '../utils/grading.js';
 import { renderStudentReportCardPage } from '../utils/reportCardPdf.js';
 import { renderPaginatedClassResultsPdf } from '../utils/classResultsPdf.js';
+import { buildStudentReportsZip } from '../utils/studentReportsZip.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -747,6 +748,95 @@ router.get('/class/:classId/exam/:examId/student-reports/pdf', (req, res) => {
   });
 
   customDoc.end();
+});
+
+router.get('/class/:classId/exam/:examId/student-reports/zip', async (req, res, next) => {
+  try {
+    const { classId, examId } = req.params;
+
+    const exam = db.prepare(`
+      SELECT e.*, c.name as class_name, c.year as class_year,
+             ce.name as component_exam_name,
+             ce.max_score as component_exam_max_score,
+             ce.type as component_exam_type
+      FROM exams e
+      JOIN classes c ON e.class_id = c.id
+      LEFT JOIN exams ce ON e.component_exam_id = ce.id
+      WHERE e.id = ? AND e.class_id = ?
+    `).get(examId, classId);
+
+    if (!exam) {
+      return res.status(404).json({ error: 'Exam not found' });
+    }
+    if (!ensureClassAccess(req, res, classId)) return;
+
+    const rankings = rankStudentsByExam(examId);
+    const schoolInfo = db.prepare('SELECT * FROM school_info WHERE id = 1').get();
+    const formTeacherName = getFormTeacherName(exam.class_id);
+    const logoPath = resolveLogoPath(schoolInfo?.logo);
+    const criteria = db.prepare(`
+      SELECT grade, min_score, max_score, points, remark
+      FROM grade_criteria
+      WHERE system = ?
+      ORDER BY min_score DESC
+    `).all(exam.grading_system);
+    const classSubjects = db.prepare(`
+      SELECT id, teacher_name
+      FROM subjects
+      WHERE class_id = ?
+    `).all(exam.class_id);
+    const subjectTeacherMap = new Map(classSubjects.map((row) => [row.id, row.teacher_name || '']));
+
+    const allScores = [];
+    rankings.forEach((entry) => {
+      const r = calculateStudentResults(examId, entry.student.id);
+      r.results.forEach((subjectRow) => {
+        allScores.push({
+          student_id: entry.student.id,
+          subject_id: subjectRow.subject_id,
+          score: subjectRow.score,
+        });
+      });
+    });
+    const subjectRankMaps = buildSubjectRankMaps(allScores);
+
+    const zipBuffer = await buildStudentReportsZip({
+      rankings,
+      exam,
+      schoolInfo,
+      formTeacherName,
+      logoPath,
+      criteria,
+      subjectTeacherMap,
+      buildReportContext: (entry) => {
+        const calculated = calculateStudentResults(examId, entry.student.id);
+        const results = calculated.results
+          .slice()
+          .sort((a, b) => (a.subject_name || '').localeCompare(b.subject_name || ''));
+        const averageScore = calculated.averageScore;
+        const totalScore = calculated.totalScore;
+        const overallGrade = getOverallGradeWithEnglishRule(exam, averageScore, results);
+        const passFail = getPassFailRemark(exam, results);
+        return {
+          studentRank: entry.rank,
+          totalPoints: entry.totalPoints,
+          results,
+          totalScore,
+          overallGrade,
+          passFail,
+          subjectRankMaps,
+        };
+      },
+    });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${exam.class_name}_${exam.name}_student_reports.zip"`);
+    res.send(zipBuffer);
+  } catch (error) {
+    next(error);
+  }
+});
+
   return;
 
   const doc = new PDFDocument({ margin: 24, size: 'A4' });

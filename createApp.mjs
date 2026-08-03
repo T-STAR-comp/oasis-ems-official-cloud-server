@@ -145,15 +145,27 @@ export function createBaseApp() {
   return app;
 }
 
+export async function mountLicenseDiscovery(app) {
+  const { mountLicenseDiscoveryRoutes } = await import('./routes/licenseDiscovery.js');
+  mountLicenseDiscoveryRoutes(app);
+}
+
 export async function mountFullStack(app) {
   const boot = app.locals.boot;
   const defaultUploadsDir = process.env.VERCEL ? '/tmp/oasis-uploads' : path.join(__dirname, 'uploads');
+  const defaultLogosDir = process.env.VERCEL ? '/tmp/oasis-logos' : path.join(__dirname, 'logos');
   const uploadsDir = process.env.OASIS_UPLOADS_DIR
     ? path.resolve(process.env.OASIS_UPLOADS_DIR)
     : defaultUploadsDir;
+  const logosDir = process.env.OASIS_LOGOS_DIR
+    ? path.resolve(process.env.OASIS_LOGOS_DIR)
+    : defaultLogosDir;
 
   if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+  if (!fs.existsSync(logosDir)) {
+    fs.mkdirSync(logosDir, { recursive: true });
   }
 
   logInfo('startup.paths_resolved', {
@@ -189,7 +201,7 @@ export async function mountFullStack(app) {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-School-Id'],
   }));
 
   app.use(rateLimit({
@@ -237,11 +249,17 @@ export async function mountFullStack(app) {
   const systemRoutes = (await import('./routes/system.js')).default;
   const analyticsRoutes = (await import('./routes/analytics.js')).default;
   const promotionRoutes = (await import('./routes/promotion.js')).default;
+  const conductRoutes = (await import('./routes/conduct.js')).default;
+  const timetableRoutes = (await import('./routes/timetable.js')).default;
+  const attendanceRoutes = (await import('./routes/attendance.js')).default;
   const debugRoutes = (await import('./routes/debug.js')).default;
   const { errorHandler } = await import('./middleware/errorHandler.js');
 
   app.use(bindSchoolContext);
   app.use('/uploads', express.static(uploadsDir));
+  app.use('/logos', express.static(logosDir));
+
+  await mountLicenseDiscovery(app);
 
   try {
     initializeDatabase();
@@ -271,6 +289,9 @@ export async function mountFullStack(app) {
   app.use('/api/system', systemRoutes);
   app.use('/api/analytics', analyticsRoutes);
   app.use('/api/promotion', promotionRoutes);
+  app.use('/api/conduct', conductRoutes);
+  app.use('/api/timetable', timetableRoutes);
+  app.use('/api/attendance', attendanceRoutes);
   app.use('/api/debug', debugRoutes);
 
   app.use((req, res, next) => {

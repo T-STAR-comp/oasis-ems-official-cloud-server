@@ -4,6 +4,7 @@ import db from '../db/database.js';
 import { authenticateToken, ensureClassAccess, getAssignedClassIds, isAdminUser } from '../middleware/auth.js';
 import { examValidation, idValidation } from '../middleware/validate.js';
 import { getGrade, rankStudentsByExam, getGradeCriteria } from '../utils/grading.js';
+import { buildMergedResults } from '../utils/mergeExams.js';
 import { ALL_GRADING_SYSTEMS, getGradingSystemsForCountry, isSupportedGradingSystem, normalizeCountry } from '../utils/education.js';
 
 const router = express.Router();
@@ -62,30 +63,6 @@ function ensureExamScoresEditable(exam, res) {
     : 'This exam is temporarily locked. Ask an admin to unlock it before editing.';
   res.status(423).json({ error: reason, lock_status: lockStatus });
   return false;
-}
-
-function buildMergedResults(sourceRows, targetMaxScore) {
-  const totals = new Map();
-  sourceRows.forEach((row) => {
-    const maxScore = Math.max(1, Number(row.source_max_score || 100));
-    const normalizedScore = (Number(row.score) / maxScore) * targetMaxScore;
-    const key = `${row.student_id}::${row.subject_id}`;
-    const current = totals.get(key) || {
-      student_id: row.student_id,
-      subject_id: row.subject_id,
-      sum: 0,
-      count: 0,
-    };
-    current.sum += normalizedScore;
-    current.count += 1;
-    totals.set(key, current);
-  });
-
-  return Array.from(totals.values()).map((entry) => ({
-    student_id: entry.student_id,
-    subject_id: entry.subject_id,
-    score: Number((entry.sum / entry.count).toFixed(2)),
-  }));
 }
 
 function getSchoolCountry() {
@@ -474,7 +451,7 @@ router.post('/', examValidation.create, (req, res, next) => {
       mergeExamIds.forEach((sourceExamId) => insertMergeSource.run(id, sourceExamId));
 
       const sourceScoreRows = db.prepare(`
-        SELECT er.student_id, er.subject_id, er.score, e.max_score as source_max_score
+        SELECT er.student_id, er.subject_id, er.score, er.exam_id as source_exam_id, e.max_score as source_max_score
         FROM exam_results er
         JOIN exams e ON e.id = er.exam_id
         WHERE er.exam_id IN (${placeholders})
@@ -484,7 +461,7 @@ router.post('/', examValidation.create, (req, res, next) => {
         throw new Error('Selected tests have no recorded results to merge');
       }
 
-      const mergedResults = buildMergedResults(sourceScoreRows, parsedMaxScore);
+      const mergedResults = buildMergedResults(sourceScoreRows, parsedMaxScore, mergeExamIds);
       const upsertResult = db.prepare(`
         INSERT INTO exam_results (exam_id, student_id, subject_id, score, grade, points)
         VALUES (?, ?, ?, ?, ?, ?)

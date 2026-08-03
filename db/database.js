@@ -220,9 +220,17 @@ function inferSchoolIdFromImportPayload(payload) {
   return normalizeSchoolId(row?.school_id);
 }
 
+function readSchoolIdFromHeader(req) {
+  return normalizeSchoolId(
+    req?.headers?.['x-school-id'] ||
+    req?.headers?.['X-School-Id']
+  );
+}
+
 function resolveRequestSchoolId(req) {
   return (
     readSchoolIdFromToken(req) ||
+    readSchoolIdFromHeader(req) ||
     normalizeSchoolId(req?.body?.school_id) ||
     inferSchoolIdFromImportPayload(req?.body?.data) ||
     normalizeSchoolId(req?.query?.school_id)
@@ -709,6 +717,59 @@ function migrateGradingTables() {
   }
 }
 
+function seedDefaultConductCategories() {
+  const count = Number(db.prepare('SELECT COUNT(*) as count FROM conduct_categories').get()?.count || 0);
+  if (count > 0) return;
+
+  const defaults = [
+    { id: 'pos-helpfulness', name: 'Helpfulness', type: 'positive', points: 2 },
+    { id: 'pos-leadership', name: 'Leadership', type: 'positive', points: 3 },
+    { id: 'pos-improvement', name: 'Notable Improvement', type: 'positive', points: 2 },
+    { id: 'neg-late', name: 'Late to Class', type: 'negative', points: -1 },
+    { id: 'neg-disruptive', name: 'Disruptive Behaviour', type: 'negative', points: -2 },
+    { id: 'neg-uniform', name: 'Uniform Violation', type: 'negative', points: -1 },
+    { id: 'neg-fighting', name: 'Fighting', type: 'negative', points: -5 },
+    { id: 'neg-absenteeism', name: 'Absenteeism Related', type: 'negative', points: -2 },
+  ];
+  const insert = db.prepare(`
+    INSERT INTO conduct_categories (id, name, type, points, is_active)
+    VALUES (?, ?, ?, ?, 1)
+  `);
+  defaults.forEach((row) => insert.run(row.id, row.name, row.type, row.points));
+}
+
+function seedDefaultConductThresholds() {
+  const row = db.prepare('SELECT id FROM conduct_thresholds WHERE id = 1').get();
+  if (row) return;
+  db.prepare(`
+    INSERT INTO conduct_thresholds (id, negative_incident_limit, alert_enabled)
+    VALUES (1, 3, 1)
+  `).run();
+}
+
+function seedDefaultTimetablePeriods() {
+  const count = Number(db.prepare('SELECT COUNT(*) as count FROM timetable_periods').get()?.count || 0);
+  if (count > 0) return;
+
+  const periods = [
+    { id: 'p1', name: 'Period 1', start: '07:30', end: '08:10', order: 1 },
+    { id: 'p2', name: 'Period 2', start: '08:10', end: '08:50', order: 2 },
+    { id: 'p3', name: 'Period 3', start: '08:50', end: '09:30', order: 3 },
+    { id: 'break1', name: 'Break', start: '09:30', end: '09:50', order: 4, isBreak: 1 },
+    { id: 'p4', name: 'Period 4', start: '09:50', end: '10:30', order: 5 },
+    { id: 'p5', name: 'Period 5', start: '10:30', end: '11:10', order: 6 },
+    { id: 'p6', name: 'Period 6', start: '11:10', end: '11:50', order: 7 },
+    { id: 'lunch', name: 'Lunch', start: '11:50', end: '12:30', order: 8, isBreak: 1 },
+    { id: 'p7', name: 'Period 7', start: '12:30', end: '13:10', order: 9 },
+    { id: 'p8', name: 'Period 8', start: '13:10', end: '13:50', order: 10 },
+  ];
+  const insert = db.prepare(`
+    INSERT INTO timetable_periods (id, name, start_time, end_time, sort_order, is_break)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  periods.forEach((p) => insert.run(p.id, p.name, p.start, p.end, p.order, p.isBreak || 0));
+}
+
 function seedGradeCriteriaForCountry(country) {
   const systems = getGradingSystemsForCountry(country);
   const insert = db.prepare(`
@@ -1035,6 +1096,128 @@ function bootstrapCurrentDatabase() {
     )
   `);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS conduct_categories (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL CHECK(type IN ('positive', 'negative')),
+      points INTEGER NOT NULL DEFAULT 0,
+      is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS conduct_incidents (
+      id TEXT PRIMARY KEY,
+      student_id TEXT NOT NULL,
+      class_id TEXT NOT NULL,
+      category_id TEXT NOT NULL,
+      incident_type TEXT NOT NULL CHECK(incident_type IN ('positive', 'negative')),
+      points INTEGER NOT NULL DEFAULT 0,
+      severity TEXT,
+      description TEXT,
+      recorded_by TEXT,
+      incident_date TEXT NOT NULL,
+      incident_time TEXT,
+      voided INTEGER NOT NULL DEFAULT 0 CHECK(voided IN (0, 1)),
+      voided_by TEXT,
+      voided_at DATETIME,
+      sync_status TEXT DEFAULT 'synced',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+      FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE,
+      FOREIGN KEY (category_id) REFERENCES conduct_categories(id)
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS conduct_thresholds (
+      id INTEGER PRIMARY KEY CHECK(id = 1),
+      negative_incident_limit INTEGER NOT NULL DEFAULT 3,
+      alert_enabled INTEGER NOT NULL DEFAULT 1 CHECK(alert_enabled IN (0, 1)),
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS timetable_periods (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_break INTEGER NOT NULL DEFAULT 0 CHECK(is_break IN (0, 1)),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS timetable_entries (
+      id TEXT PRIMARY KEY,
+      class_id TEXT NOT NULL,
+      subject_id TEXT,
+      teacher_id TEXT,
+      period_id TEXT NOT NULL,
+      day_of_week INTEGER NOT NULL CHECK(day_of_week BETWEEN 0 AND 6),
+      room TEXT,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'published')),
+      academic_year TEXT,
+      term TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE,
+      FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE SET NULL,
+      FOREIGN KEY (period_id) REFERENCES timetable_periods(id) ON DELETE CASCADE
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS academic_calendars (
+      id TEXT PRIMARY KEY,
+      academic_year TEXT NOT NULL,
+      term TEXT NOT NULL,
+      start_date TEXT NOT NULL,
+      end_date TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS attendance_records (
+      id TEXT PRIMARY KEY,
+      class_id TEXT NOT NULL,
+      student_id TEXT NOT NULL,
+      attendance_date TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('present', 'absent', 'late', 'excused', 'sick', 'official')),
+      reason_note TEXT,
+      recorded_by TEXT,
+      sync_status TEXT DEFAULT 'synced',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(class_id, student_id, attendance_date),
+      FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE,
+      FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS device_licenses (
+      id TEXT PRIMARY KEY,
+      school_id TEXT NOT NULL,
+      machine_hash TEXT NOT NULL,
+      activation_code TEXT,
+      expires_at INTEGER,
+      plan_kind TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(school_id, machine_hash)
+    )
+  `);
+
+  seedDefaultConductCategories();
+  seedDefaultConductThresholds();
+  seedDefaultTimetablePeriods();
+
   seedGradeCriteriaForCountry(country);
 
   // Create indexes for better performance
@@ -1060,6 +1243,13 @@ function bootstrapCurrentDatabase() {
     CREATE INDEX IF NOT EXISTS idx_exam_results_exam_student ON exam_results(exam_id, student_id);
     CREATE INDEX IF NOT EXISTS idx_promotion_actions_created ON promotion_actions(created_at);
     CREATE INDEX IF NOT EXISTS idx_promotion_criteria_next_class ON promotion_criteria(next_class_id);
+    CREATE INDEX IF NOT EXISTS idx_conduct_incidents_student ON conduct_incidents(student_id);
+    CREATE INDEX IF NOT EXISTS idx_conduct_incidents_class ON conduct_incidents(class_id);
+    CREATE INDEX IF NOT EXISTS idx_conduct_incidents_date ON conduct_incidents(incident_date);
+    CREATE INDEX IF NOT EXISTS idx_timetable_entries_class ON timetable_entries(class_id);
+    CREATE INDEX IF NOT EXISTS idx_attendance_class_date ON attendance_records(class_id, attendance_date);
+    CREATE INDEX IF NOT EXISTS idx_attendance_student ON attendance_records(student_id);
+    CREATE INDEX IF NOT EXISTS idx_device_licenses_school ON device_licenses(school_id);
   `);
 
   if (USE_MYSQL) {

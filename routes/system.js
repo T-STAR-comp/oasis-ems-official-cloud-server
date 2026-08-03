@@ -12,6 +12,7 @@ import db, {
 } from '../db/database.js';
 import { authenticateToken, isAdminUser } from '../middleware/auth.js';
 import { persistSchoolLogoFile, resolveUploadsRoot } from '../utils/schoolLogo.js';
+import { exportClassData, importClassData } from '../utils/classDataTransfer.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -221,6 +222,30 @@ router.post('/import-bootstrap', (req, res) => {
       error: 'Cloud migration requires a verified online subscription for this School ID. Finish payment verification and activation, then try again.',
     });
   }, { allowCreate: true });
+});
+
+router.get('/export-class/:classId', authenticateToken, (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+  try {
+    const payload = exportClassData(req.params.classId);
+    return res.json(payload);
+  } catch (error) {
+    return res.status(404).json({ error: error.message || 'Failed to export class data.' });
+  }
+});
+
+router.post('/import-class', authenticateToken, (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+  try {
+    const imported = importClassData(req.body || {});
+    return res.json({
+      message: 'Class data imported successfully.',
+      imported,
+      class_id: req.body?.data?.classes?.[0]?.id || null,
+    });
+  } catch (error) {
+    return res.status(400).json({ error: error.message || 'Failed to import class data.' });
+  }
 });
 
 export default router;
