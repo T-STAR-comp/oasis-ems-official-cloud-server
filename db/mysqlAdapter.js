@@ -57,6 +57,73 @@ function splitStatements(sql) {
     .filter(Boolean);
 }
 
+const MYSQL_INDEX_UNPREFIXED_COLUMNS = new Set([
+  'is_compulsory',
+  'online_features_enabled',
+  'is_active',
+  'voided',
+  'is_break',
+  'day_of_week',
+  'points',
+  'sort_order',
+  'negative_incident_limit',
+  'alert_enabled',
+  'duration_days',
+  'amount',
+  'max_score',
+  'component_weight',
+  'current_weight',
+  'score',
+  'min_subjects',
+  'max_subjects',
+  'expires_at',
+  'created_at',
+  'updated_at',
+  'activated_at',
+  'locked_at',
+  'voided_at',
+  'oae_activated_at',
+  'undone_at',
+]);
+
+function mysqlIndexPrefixLength(columnName) {
+  const lower = String(columnName || '').toLowerCase();
+  if (MYSQL_INDEX_UNPREFIXED_COLUMNS.has(lower)) {
+    return null;
+  }
+  if (lower.endsWith('_id') || lower === 'id') {
+    return 64;
+  }
+  if (lower.includes('date') || lower === 'year' || lower === 'term' || lower === 'time') {
+    return 32;
+  }
+  if (lower === 'status' || lower === 'type' || lower === 'plan_kind') {
+    return 32;
+  }
+  return 64;
+}
+
+function normalizeMysqlIndexColumns(columnsPart) {
+  return String(columnsPart || '')
+    .split(',')
+    .map((part) => {
+      const trimmed = part.trim();
+      if (!trimmed || /\(\d+\)$/.test(trimmed)) {
+        return trimmed;
+      }
+
+      const [columnName, ...rest] = trimmed.split(/\s+/);
+      const prefixLength = mysqlIndexPrefixLength(columnName);
+      if (prefixLength == null) {
+        return trimmed;
+      }
+
+      const suffix = rest.length ? ` ${rest.join(' ')}` : '';
+      return `${columnName}(${prefixLength})${suffix}`;
+    })
+    .join(', ');
+}
+
 function normalizeStatement(sql) {
   let next = String(sql || '').trim();
 
@@ -69,6 +136,7 @@ function normalizeStatement(sql) {
     .replace(/\bCREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\b/gi, 'CREATE INDEX')
     .replace(/\b(\w+_id)\s+TEXT\b/gi, '$1 VARCHAR(191)')
     .replace(/\bid\s+TEXT\b/gi, 'id VARCHAR(191)')
+    .replace(/\b(incident_date|attendance_date|machine_hash|year|term|admission_number|recorded_by|voided_by|incident_time|academic_year|start_time|end_time|start_date|end_date)\s+TEXT\b/gi, '$1 VARCHAR(191)')
     .replace(/\b(username|email|country|plan_kind|status|activation_code|charge_id|payment_method|payment_channel|currency|type|role|gender|grading_system|lock_status|system|internal_uid|incident_type|sync_status)\s+TEXT\b/gi, '$1 VARCHAR(191)')
     .replace(/\bINTEGER\s+PRIMARY\s+KEY\s+AUTO_INCREMENT\b/gi, 'INT PRIMARY KEY AUTO_INCREMENT')
     .replace(/\bINSERT\s+OR\s+IGNORE\b/gi, 'INSERT IGNORE')
@@ -80,6 +148,16 @@ function normalizeStatement(sql) {
   next = next.replace(/VALUES\((\w+)\b/gi, 'VALUES($1)');
   next = next.replace(/ON\s+CONFLICT\s*\([^)]+\)\s*DO\s+UPDATE\s+SET/gi, 'ON DUPLICATE KEY UPDATE');
   next = next.replace(/id\s+INTEGER\s+PRIMARY\s+KEY\s+CHECK\s*\([^)]+\)/gi, 'id INT PRIMARY KEY');
+  next = next.replace(
+    /\bCREATE INDEX\s+(\S+)\s+ON\s+(\S+)\(([^)]+)\)/gi,
+    (_match, indexName, tableName, columns) => (
+      `CREATE INDEX ${indexName} ON ${tableName}(${normalizeMysqlIndexColumns(columns)})`
+    ),
+  );
+  next = next.replace(
+    /\bUNIQUE\s*\(([^)]+)\)/gi,
+    (_match, columns) => `UNIQUE(${normalizeMysqlIndexColumns(columns)})`,
+  );
 
   return next;
 }
