@@ -149,12 +149,13 @@ function normalizeStatement(sql) {
   next = next.replace(/VALUES\((\w+)\b/gi, 'VALUES($1)');
   next = next.replace(/ON\s+CONFLICT\s*\([^)]+\)\s*DO\s+UPDATE\s+SET/gi, 'ON DUPLICATE KEY UPDATE');
   next = next.replace(/id\s+INTEGER\s+PRIMARY\s+KEY\s+CHECK\s*\([^)]+\)/gi, 'id INT PRIMARY KEY');
-  next = next.replace(
-    /\bCREATE INDEX\s+(\S+)\s+ON\s+(\S+)\(([^)]+)\)/gi,
-    (_match, indexName, tableName, columns) => (
-      `CREATE INDEX ${indexName} ON ${tableName}(${normalizeMysqlIndexColumns(columns)})`
-    ),
-  );
+  const createIndexMatch = next.match(/\bCREATE INDEX\s+(\S+)\s+ON\s+(\S+)\((.+)\)\s*$/i);
+  if (createIndexMatch) {
+    const [, indexName, tableName, columns] = createIndexMatch;
+    if (!/\(\d+\)/.test(columns)) {
+      next = `CREATE INDEX ${indexName} ON ${tableName}(${normalizeMysqlIndexColumns(columns)})`;
+    }
+  }
   next = next.replace(
     /\bUNIQUE\s*\(([^)]+)\)/gi,
     (_match, columns) => `UNIQUE(${normalizeMysqlIndexColumns(columns)})`,

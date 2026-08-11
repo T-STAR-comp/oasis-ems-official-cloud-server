@@ -1243,39 +1243,38 @@ function bootstrapCurrentDatabase() {
 
   // Create indexes for better performance
   if (USE_MYSQL) {
-    // Explicit prefix lengths keep composite utf8mb4 indexes under MySQL's 3072-byte limit.
     db.exec(`
-      CREATE INDEX idx_students_class ON students(class_id(64));
-      CREATE INDEX idx_subjects_class ON subjects(class_id(64));
-      CREATE INDEX idx_user_class_assignments_user ON user_class_assignments(user_id(64));
-      CREATE INDEX idx_user_class_assignments_class ON user_class_assignments(class_id(64));
-      CREATE INDEX idx_subjects_compulsory ON subjects(class_id(64), is_compulsory);
-      CREATE INDEX idx_student_subjects_student ON student_subjects(student_id(64));
-      CREATE INDEX idx_student_subjects_subject ON student_subjects(subject_id(64));
-      CREATE INDEX idx_exams_class ON exams(class_id(64));
-      CREATE INDEX idx_results_exam ON exam_results(exam_id(64));
-      CREATE INDEX idx_results_student ON exam_results(student_id(64));
-      CREATE INDEX idx_exam_subject_profiles_exam ON exam_subject_grading_profiles(exam_id(64));
-      CREATE INDEX idx_exam_subject_max_scores_exam ON exam_subject_max_scores(exam_id(64));
-      CREATE INDEX idx_exam_merge_sources_exam ON exam_merge_sources(exam_id(64));
-      CREATE INDEX idx_subscription_records_status ON subscription_records(status(32));
-      CREATE INDEX idx_subscription_records_plan ON subscription_records(plan_kind(32));
-      CREATE INDEX idx_subscription_records_charge_id ON subscription_records(charge_id(64));
-      CREATE INDEX idx_subscription_records_school_id ON subscription_records(school_id(64));
-      CREATE INDEX idx_subscription_records_activation_code ON subscription_records(activation_code(64));
-      CREATE INDEX idx_subscription_records_school_status ON subscription_records(school_id(64), status(32), online_features_enabled);
-      CREATE INDEX idx_exam_results_exam_student ON exam_results(exam_id(64), student_id(64));
+      CREATE INDEX idx_students_class ON students(class_id);
+      CREATE INDEX idx_subjects_class ON subjects(class_id);
+      CREATE INDEX idx_user_class_assignments_user ON user_class_assignments(user_id);
+      CREATE INDEX idx_user_class_assignments_class ON user_class_assignments(class_id);
+      CREATE INDEX idx_subjects_compulsory ON subjects(class_id, is_compulsory);
+      CREATE INDEX idx_student_subjects_student ON student_subjects(student_id);
+      CREATE INDEX idx_student_subjects_subject ON student_subjects(subject_id);
+      CREATE INDEX idx_exams_class ON exams(class_id);
+      CREATE INDEX idx_results_exam ON exam_results(exam_id);
+      CREATE INDEX idx_results_student ON exam_results(student_id);
+      CREATE INDEX idx_exam_subject_profiles_exam ON exam_subject_grading_profiles(exam_id);
+      CREATE INDEX idx_exam_subject_max_scores_exam ON exam_subject_max_scores(exam_id);
+      CREATE INDEX idx_exam_merge_sources_exam ON exam_merge_sources(exam_id);
+      CREATE INDEX idx_subscription_records_status ON subscription_records(status);
+      CREATE INDEX idx_subscription_records_plan ON subscription_records(plan_kind);
+      CREATE INDEX idx_subscription_records_charge_id ON subscription_records(charge_id);
+      CREATE INDEX idx_subscription_records_school_id ON subscription_records(school_id);
+      CREATE INDEX idx_subscription_records_activation_code ON subscription_records(activation_code);
+      CREATE INDEX idx_subscription_records_school_status ON subscription_records(school_id, status, online_features_enabled);
+      CREATE INDEX idx_exam_results_exam_student ON exam_results(exam_id, student_id);
       CREATE INDEX idx_promotion_actions_created ON promotion_actions(created_at);
-      CREATE INDEX idx_promotion_criteria_next_class ON promotion_criteria(next_class_id(64));
-      CREATE INDEX idx_conduct_incidents_student ON conduct_incidents(student_id(64));
-      CREATE INDEX idx_conduct_incidents_class ON conduct_incidents(class_id(64));
-      CREATE INDEX idx_conduct_incidents_date ON conduct_incidents(incident_date(32));
-      CREATE INDEX idx_timetable_entries_class ON timetable_entries(class_id(64));
-      CREATE INDEX idx_attendance_class_date ON attendance_records(class_id(64), attendance_date(32));
-      CREATE INDEX idx_attendance_student ON attendance_records(student_id(64));
-      CREATE INDEX idx_device_licenses_school ON device_licenses(school_id(64));
-      CREATE INDEX idx_subscription_records_internal_uid ON subscription_records(internal_uid(64));
-      CREATE INDEX idx_classes_year ON classes(year(32));
+      CREATE INDEX idx_promotion_criteria_next_class ON promotion_criteria(next_class_id);
+      CREATE INDEX idx_conduct_incidents_student ON conduct_incidents(student_id);
+      CREATE INDEX idx_conduct_incidents_class ON conduct_incidents(class_id);
+      CREATE INDEX idx_conduct_incidents_date ON conduct_incidents(incident_date);
+      CREATE INDEX idx_timetable_entries_class ON timetable_entries(class_id);
+      CREATE INDEX idx_attendance_class_date ON attendance_records(class_id, attendance_date);
+      CREATE INDEX idx_attendance_student ON attendance_records(student_id);
+      CREATE INDEX idx_device_licenses_school ON device_licenses(school_id);
+      CREATE INDEX idx_subscription_records_internal_uid ON subscription_records(internal_uid);
+      CREATE INDEX idx_classes_year ON classes(year);
     `);
   } else {
     db.exec(`
