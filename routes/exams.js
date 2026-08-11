@@ -9,6 +9,11 @@ import { ALL_GRADING_SYSTEMS, getGradingSystemsForCountry, isSupportedGradingSys
 
 const router = express.Router();
 
+function isMidtermExam(examOrType) {
+  const type = typeof examOrType === 'string' ? examOrType : examOrType?.type;
+  return String(type || '').toLowerCase() === 'midterm';
+}
+
 // All routes require authentication
 router.use(authenticateToken);
 
@@ -50,6 +55,37 @@ function resolveSubjectGrading(profileMap, subjectId, fallbackSystem) {
   };
 }
 
+function loadSubjectMaxScoreRows(examId) {
+  return db.prepare(`
+    SELECT subject_id, max_score
+    FROM exam_subject_max_scores
+    WHERE exam_id = ?
+    ORDER BY subject_id ASC
+  `).all(examId);
+}
+
+function saveSubjectMaxScores(examId, classId, subjectMaxScores) {
+  if (!Array.isArray(subjectMaxScores)) return;
+  const validSubjects = new Set(
+    db.prepare('SELECT id FROM subjects WHERE class_id = ?').all(classId).map((row) => row.id),
+  );
+  const upsert = db.prepare(`
+    INSERT INTO exam_subject_max_scores (exam_id, subject_id, max_score)
+    VALUES (?, ?, ?)
+    ON CONFLICT(exam_id, subject_id) DO UPDATE SET
+      max_score = excluded.max_score,
+      updated_at = CURRENT_TIMESTAMP
+  `);
+  subjectMaxScores.forEach((row) => {
+    const subjectId = String(row?.subject_id || '').trim();
+    const parsed = Number(row?.max_score);
+    if (!subjectId || !validSubjects.has(subjectId) || !Number.isFinite(parsed) || parsed <= 0) {
+      return;
+    }
+    upsert.run(examId, subjectId, parsed);
+  });
+}
+
 function normalizeLockStatus(exam) {
   const status = String(exam?.lock_status || 'none').toLowerCase();
   return ['none', 'temporary', 'permanent'].includes(status) ? status : 'none';
@@ -75,11 +111,10 @@ function getAllowedGradingSystems() {
 }
 
 function getUnavailableGradingMessage(system) {
-  const country = getSchoolCountry();
-  if (system === 'msce' && country === 'Nigeria') {
-    return 'MSCE grading is not available for Nigerian schools.';
+  if (!isSupportedGradingSystem(system)) {
+    return 'Unsupported grading system.';
   }
-  return `${system} grading is not available for ${country}.`;
+  return `${system} grading is not available for this school.`;
 }
 
 function ensureAllowedGradingSystem(system, res) {
@@ -255,6 +290,7 @@ router.get('/:id', idValidation, (req, res) => {
       subjects,
       rankings,
       subject_grading_profiles: subjectGradingProfiles,
+      subject_max_scores: loadSubjectMaxScoreRows(id),
     }
   });
 });
@@ -284,9 +320,12 @@ router.get('/:id/subject-grading', idValidation, (req, res) => {
 router.put('/:id/subject-grading', idValidation, (req, res) => {
   const { id } = req.params;
   const { profiles } = req.body;
-  const exam = db.prepare('SELECT id, class_id, lock_status FROM exams WHERE id = ?').get(id);
+  const exam = db.prepare('SELECT id, class_id, lock_status, type FROM exams WHERE id = ?').get(id);
   if (!exam) {
     return res.status(404).json({ error: 'Exam not found' });
+  }
+  if (isMidtermExam(exam)) {
+    return res.status(400).json({ error: 'Mid Term exams rank by marks only and do not use grading systems.' });
   }
   if (!ensureClassAccess(req, res, exam.class_id)) return;
   if (!ensureExamScoresEditable(exam, res)) return;
@@ -366,10 +405,12 @@ router.post('/', examValidation.create, (req, res, next) => {
       component_exam_id = null,
       merge_exam_ids = [],
       component_weight = 0,
-      current_weight = 100
+      current_weight = 100,
+      subject_max_scores = [],
     } = req.body;
 
-    if (!ensureAllowedGradingSystem(grading_system, res)) return;
+    const effectiveGradingSystem = isMidtermExam(type) ? 'normal' : grading_system;
+    if (!isMidtermExam(type) && !ensureAllowedGradingSystem(effectiveGradingSystem, res)) return;
 
     // Verify class exists
     const classExists = db.prepare('SELECT id FROM classes WHERE id = ?').get(class_id);
@@ -424,7 +465,9 @@ router.post('/', examValidation.create, (req, res, next) => {
       db.prepare(`
         INSERT INTO exams (id, class_id, name, type, term, year, grading_system, max_score, component_exam_id, component_weight, current_weight)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, class_id, name, type, term, year, grading_system, parsedMaxScore, componentExamId, parsedComponentWeight, parsedCurrentWeight);
+      `).run(id, class_id, name, type, term, year, effectiveGradingSystem, parsedMaxScore, componentExamId, parsedComponentWeight, parsedCurrentWeight);
+
+      saveSubjectMaxScores(id, class_id, subject_max_scores);
 
       if (!isMergeExam) return;
 
@@ -470,7 +513,11 @@ router.post('/', examValidation.create, (req, res, next) => {
       `);
 
       mergedResults.forEach((resultRow) => {
-        const graded = getGrade(resultRow.score, grading_system);
+        if (isMidtermExam(type)) {
+          upsertResult.run(id, resultRow.student_id, resultRow.subject_id, resultRow.score, null, null);
+          return;
+        }
+        const graded = getGrade(resultRow.score, effectiveGradingSystem);
         upsertResult.run(id, resultRow.student_id, resultRow.subject_id, resultRow.score, graded.grade, graded.points);
       });
     });
@@ -526,7 +573,7 @@ router.put('/:id', idValidation, (req, res, next) => {
       updates.push('year = ?');
       values.push(year);
     }
-    if (grading_system !== undefined) {
+    if (grading_system !== undefined && !isMidtermExam(existing)) {
       if (!ensureAllowedGradingSystem(grading_system, res)) return;
       updates.push('grading_system = ?');
       values.push(grading_system);
@@ -686,7 +733,7 @@ router.post('/:id/results', examValidation.addResult, (req, res, next) => {
 
     // Get exam
     const exam = db.prepare(
-      "SELECT id, class_id, grading_system, max_score, lock_status FROM exams WHERE id = ?"
+      "SELECT id, class_id, type, grading_system, max_score, lock_status FROM exams WHERE id = ?"
     ).get(exam_id);
 
     if (!exam) {
@@ -749,11 +796,13 @@ router.post('/:id/results', examValidation.addResult, (req, res, next) => {
       }
 
       const subjectGrading = resolveSubjectGrading(profileMap, subject_id, exam.grading_system);
-      const { grade, points } = getGrade(roundedScore, subjectGrading.gradingSystem, subjectGrading.customCriteria);
+      const gradeFields = isMidtermExam(exam)
+        ? { grade: null, points: null }
+        : getGrade(roundedScore, subjectGrading.gradingSystem, subjectGrading.customCriteria);
 
       insert.run(
-        exam_id, student_id, subject_id, roundedScore, grade, points,
-        roundedScore, grade, points
+        exam_id, student_id, subject_id, roundedScore, gradeFields.grade, gradeFields.points,
+        roundedScore, gradeFields.grade, gradeFields.points
       );
 
       const result = db.prepare(`
@@ -838,8 +887,10 @@ router.post('/:id/results/bulk', authenticateToken, (req, res, next) => {
 
         const roundedScore = Math.round(score);
         const subjectGrading = resolveSubjectGrading(profileMap, r.subject_id, exam.grading_system);
-        const { grade, points } = getGrade(roundedScore, subjectGrading.gradingSystem, subjectGrading.customCriteria);
-        upsert.run(exam_id, r.student_id, r.subject_id, roundedScore, grade, points, roundedScore, grade, points);
+        const gradeFields = isMidtermExam(exam)
+          ? { grade: null, points: null }
+          : getGrade(roundedScore, subjectGrading.gradingSystem, subjectGrading.customCriteria);
+        upsert.run(exam_id, r.student_id, r.subject_id, roundedScore, gradeFields.grade, gradeFields.points, roundedScore, gradeFields.grade, gradeFields.points);
         saved++;
       }
 

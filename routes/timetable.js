@@ -137,6 +137,45 @@ router.post('/entries', requireRole('admin'), (req, res) => {
   res.status(201).json({ message: 'Timetable entries saved.', ids: created });
 });
 
+router.put('/entries/replace', requireRole('admin'), (req, res) => {
+  const classId = String(req.body?.class_id || '').trim();
+  const rows = Array.isArray(req.body?.entries) ? req.body.entries : [];
+  if (!classId) {
+    return res.status(400).json({ error: 'class_id is required.' });
+  }
+
+  const classExists = db.prepare('SELECT id FROM classes WHERE id = ?').get(classId);
+  if (!classExists) {
+    return res.status(404).json({ error: 'Class not found.' });
+  }
+
+  const tx = db.transaction((entries) => {
+    db.prepare('DELETE FROM timetable_entries WHERE class_id = ?').run(classId);
+    const insert = db.prepare(`
+      INSERT INTO timetable_entries (
+        id, class_id, subject_id, teacher_id, period_id, day_of_week, room, status, academic_year, term
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    entries.forEach((row) => {
+      insert.run(
+        row.id || uuidv4(),
+        classId,
+        row.subject_id || null,
+        row.teacher_id || null,
+        row.period_id,
+        Number(row.day_of_week),
+        row.room || null,
+        row.status === 'published' ? 'published' : 'draft',
+        row.academic_year || null,
+        row.term || null,
+      );
+    });
+  });
+
+  tx(rows);
+  res.json({ message: 'Timetable saved for class.', count: rows.length });
+});
+
 router.post('/publish', requireRole('admin'), (req, res) => {
   const classId = req.body?.class_id;
   if (!classId) return res.status(400).json({ error: 'class_id is required.' });

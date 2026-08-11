@@ -32,6 +32,7 @@ const TABLES = [
   'grade_criteria',
   'user_class_assignments',
   'exam_subject_grading_profiles',
+  'exam_subject_max_scores',
   'exam_merge_sources',
   'promotion_criteria',
   'promotion_actions',

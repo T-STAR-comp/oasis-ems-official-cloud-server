@@ -2,6 +2,7 @@ import MySql from 'sync-mysql';
 
 export const TENANT_TABLE_NAMES = [
   'exam_subject_grading_profiles',
+  'exam_subject_max_scores',
   'exam_merge_sources',
   'promotion_criteria',
   'promotion_actions',

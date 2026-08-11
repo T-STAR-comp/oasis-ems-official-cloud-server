@@ -3,23 +3,18 @@ export const TRIAL_DURATION_DAYS = 365;
 export const DIGITAL_SUBSCRIPTION_DURATION_DAYS = 365;
 
 const DIGITAL_PAYMENT_METHODS = {
-  Nigeria: [
-    { code: 'visa', label: 'Visa', channel: 'card' },
-    { code: 'mastercard', label: 'Mastercard', channel: 'card' },
-  ],
   Malawi: [
     { code: 'tnm', label: 'TNM MoMo', channel: 'mobile_money' },
     { code: 'airtel', label: 'Airtel Money', channel: 'mobile_money' },
   ],
 };
 
-export function normalizeSubscriptionCountry(value) {
-  return String(value || '').trim().toLowerCase() === 'nigeria' ? 'Nigeria' : 'Malawi';
+export function normalizeSubscriptionCountry(_value) {
+  return 'Malawi';
 }
 
-export function getDigitalPaymentMethods(country) {
-  const normalized = normalizeSubscriptionCountry(country);
-  return (DIGITAL_PAYMENT_METHODS[normalized] || []).map((entry) => ({ ...entry }));
+export function getDigitalPaymentMethods(_country) {
+  return DIGITAL_PAYMENT_METHODS.Malawi.map((entry) => ({ ...entry }));
 }
 
 export function convertPlanMonthsToDays(durationMonths) {
@@ -64,32 +59,18 @@ function buildNormalizedPlan({
   };
 }
 
-export function getFallbackDigitalSubscriptionCatalog(country) {
-  const normalized = normalizeSubscriptionCountry(country);
-  const methods = getDigitalPaymentMethods(normalized);
-
-  if (normalized === 'Nigeria') {
-    return {
-      country: normalized,
-      currency: 'USD',
-      methods,
-      plans: [],
-      source: 'unavailable',
-    };
-  }
-
+export function getFallbackDigitalSubscriptionCatalog(_country) {
   return {
-    country: normalized,
+    country: 'Malawi',
     currency: 'MWK',
-    methods,
+    methods: getDigitalPaymentMethods('Malawi'),
     plans: [],
     source: 'unavailable',
   };
 }
 
-export function normalizeRemoteDigitalPlans(country, payload) {
-  const normalized = normalizeSubscriptionCountry(country);
-  const fallback = getFallbackDigitalSubscriptionCatalog(normalized);
+export function normalizeRemoteDigitalPlans(_country, payload) {
+  const fallback = getFallbackDigitalSubscriptionCatalog('Malawi');
   const rawPlans = Array.isArray(payload?.plans) ? payload.plans : [];
 
   const plans = rawPlans.map((entry, index) => {
@@ -97,14 +78,11 @@ export function normalizeRemoteDigitalPlans(country, payload) {
     if (!durationMonths) return null;
 
     const preferredCurrency = String(entry?.currency || '').trim().toUpperCase();
-    const inferredCurrency = preferredCurrency
-      || (normalized === 'Malawi' || entry?.price_kwacha ? 'MWK' : 'USD');
+    const inferredCurrency = preferredCurrency || (entry?.price_kwacha ? 'MWK' : 'MWK');
     const amount = parsePositiveNumber(
       entry?.amount
       ?? entry?.price
       ?? entry?.price_kwacha
-      ?? entry?.price_usd
-      ?? entry?.price_naira
     );
 
     if (!amount) return null;
@@ -130,7 +108,7 @@ export function normalizeRemoteDigitalPlans(country, payload) {
   }
 
   return {
-    country: normalized,
+    country: 'Malawi',
     currency: plans[0]?.currency || fallback.currency,
     methods: fallback.methods,
     plans,
@@ -138,8 +116,8 @@ export function normalizeRemoteDigitalPlans(country, payload) {
   };
 }
 
-export function getDigitalSubscriptionPlan(country) {
-  const catalog = getFallbackDigitalSubscriptionCatalog(country);
+export function getDigitalSubscriptionPlan(_country) {
+  const catalog = getFallbackDigitalSubscriptionCatalog('Malawi');
   const plan = catalog.plans[0] || null;
   if (!plan) return null;
 
@@ -152,13 +130,13 @@ export function getDigitalSubscriptionPlan(country) {
   };
 }
 
-export function isDigitalMethodAllowed(country, method) {
-  return getDigitalPaymentMethods(country)
+export function isDigitalMethodAllowed(_country, method) {
+  return getDigitalPaymentMethods('Malawi')
     .some((entry) => entry.code === String(method || '').trim().toLowerCase());
 }
 
-export function getDigitalMethodMeta(country, method) {
-  return getDigitalPaymentMethods(country)
+export function getDigitalMethodMeta(_country, method) {
+  return getDigitalPaymentMethods('Malawi')
     .find((entry) => entry.code === String(method || '').trim().toLowerCase()) || null;
 }
 
@@ -178,4 +156,3 @@ export function calculateExpiryUnix(durationDays, issuedAt = Math.floor(Date.now
   const days = Number(durationDays || 0);
   return issuedAt + Math.max(0, days) * 24 * 60 * 60;
 }
-

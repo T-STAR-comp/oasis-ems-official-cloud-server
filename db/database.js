@@ -289,6 +289,13 @@ function ensureTenantInitialized(schoolId) {
       bootstrapCurrentDatabase();
     }, { allowCreate: true });
     initializedTenants.add(normalizedSchoolId);
+    console.log('[oasis-cloud] tenant.bootstrap_ok', { school_id: normalizedSchoolId });
+  } catch (error) {
+    console.error('[oasis-cloud] tenant.bootstrap_failed', {
+      school_id: normalizedSchoolId,
+      message: error?.message || String(error),
+    });
+    throw error;
   } finally {
     initializingTenants.delete(normalizedSchoolId);
   }
@@ -712,8 +719,10 @@ function migrateGradingTables() {
     migrateGradeCriteriaTable();
     migrateExamSubjectProfilesTable();
     repairExamResultsForeignKey();
+    console.log('[oasis-cloud] database.migrations.grading_tables_ok');
   } catch (error) {
-    console.error('Failed to migrate grading tables:', error);
+    console.error('[oasis-cloud] database.migrations.grading_tables_failed', error);
+    throw error;
   }
 }
 
@@ -1049,6 +1058,18 @@ function bootstrapCurrentDatabase() {
   `);
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS exam_subject_max_scores (
+      exam_id TEXT NOT NULL,
+      subject_id TEXT NOT NULL,
+      max_score REAL NOT NULL CHECK(max_score > 0),
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (exam_id, subject_id),
+      FOREIGN KEY (exam_id) REFERENCES exams(id) ON DELETE CASCADE,
+      FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+    )
+  `);
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS exam_merge_sources (
       exam_id TEXT NOT NULL,
       source_exam_id TEXT NOT NULL,
@@ -1235,6 +1256,7 @@ function bootstrapCurrentDatabase() {
       CREATE INDEX idx_results_exam ON exam_results(exam_id(64));
       CREATE INDEX idx_results_student ON exam_results(student_id(64));
       CREATE INDEX idx_exam_subject_profiles_exam ON exam_subject_grading_profiles(exam_id(64));
+      CREATE INDEX idx_exam_subject_max_scores_exam ON exam_subject_max_scores(exam_id(64));
       CREATE INDEX idx_exam_merge_sources_exam ON exam_merge_sources(exam_id(64));
       CREATE INDEX idx_subscription_records_status ON subscription_records(status(32));
       CREATE INDEX idx_subscription_records_plan ON subscription_records(plan_kind(32));
@@ -1268,6 +1290,7 @@ function bootstrapCurrentDatabase() {
       CREATE INDEX IF NOT EXISTS idx_results_exam ON exam_results(exam_id);
       CREATE INDEX IF NOT EXISTS idx_results_student ON exam_results(student_id);
       CREATE INDEX IF NOT EXISTS idx_exam_subject_profiles_exam ON exam_subject_grading_profiles(exam_id);
+      CREATE INDEX IF NOT EXISTS idx_exam_subject_max_scores_exam ON exam_subject_max_scores(exam_id);
       CREATE INDEX IF NOT EXISTS idx_exam_merge_sources_exam ON exam_merge_sources(exam_id);
       CREATE INDEX IF NOT EXISTS idx_subscription_records_status ON subscription_records(status);
       CREATE INDEX IF NOT EXISTS idx_subscription_records_plan ON subscription_records(plan_kind);
@@ -1339,6 +1362,7 @@ export function resetEducationData(nextCountry) {
   const wipeTables = [
     'exam_results',
     'exam_subject_grading_profiles',
+    'exam_subject_max_scores',
     'exam_merge_sources',
     'exams',
     'student_subjects',

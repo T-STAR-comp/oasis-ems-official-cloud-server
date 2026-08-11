@@ -79,6 +79,32 @@ function loadExamSubjectProfiles(examId) {
   return map;
 }
 
+function loadExamSubjectMaxScores(examId) {
+  const rows = db.prepare(`
+    SELECT subject_id, max_score
+    FROM exam_subject_max_scores
+    WHERE exam_id = ?
+  `).all(examId);
+  const map = new Map();
+  rows.forEach((row) => map.set(row.subject_id, Number(row.max_score)));
+  return map;
+}
+
+export function getSubjectMaxScore(maxScoreMap, subjectId, examMaxScore = 100) {
+  const configured = maxScoreMap.get(subjectId);
+  if (Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+  return Math.max(1, Number(examMaxScore) || 100);
+}
+
+export function normalizeSubjectScoreForGrading(rawScore, subjectMaxScore) {
+  const raw = Number(rawScore);
+  const max = Math.max(1, Number(subjectMaxScore) || 100);
+  if (!Number.isFinite(raw)) return 0;
+  return Number(((raw / max) * 100).toFixed(2));
+}
+
 function resolveSubjectGrading(profileMap, subjectId, fallbackSystem) {
   const profile = profileMap.get(subjectId);
   if (!profile) {
@@ -117,6 +143,22 @@ function isEnglishSubject(row) {
   return code === 'ENG' || code === 'ENGLISH' || name === 'english' || name === 'english language';
 }
 
+export function isMidtermExamType(type) {
+  return String(type || '').toLowerCase() === 'midterm';
+}
+
+function buildMidtermResultRow(baseRow, score) {
+  return {
+    ...baseRow,
+    score,
+    grading_system: null,
+    point_based: false,
+    grade: null,
+    points: null,
+    remark: null,
+  };
+}
+
 function calculateBestSixPoints(results = []) {
   const rows = (results || []).filter((row) => Number.isFinite(Number(row.points)));
   if (!rows.length) return null;
@@ -136,6 +178,8 @@ export function calculateStudentResults(examId, studentId) {
     ? db.prepare('SELECT id, max_score FROM exams WHERE id = ?').get(exam.component_exam_id)
     : null;
   const profileMap = loadExamSubjectProfiles(examId);
+  const subjectMaxScoreMap = loadExamSubjectMaxScores(examId);
+  const isMidterm = isMidtermExamType(exam.type);
 
   const currentRows = db.prepare(`
     SELECT er.*, s.name as subject_name, s.code as subject_code
@@ -148,11 +192,17 @@ export function calculateStudentResults(examId, studentId) {
   const hasComponent = !!exam.component_exam_id;
   if (!hasComponent) {
     const results = currentRows.map((row) => {
+      if (isMidterm) {
+        return buildMidtermResultRow(row, row.score);
+      }
       const subjectGrading = resolveSubjectGrading(profileMap, row.subject_id, exam.grading_system);
-      const gradeInfo = getGrade(row.score, subjectGrading.gradingSystem, subjectGrading.customCriteria);
+      const subjectMaxScore = getSubjectMaxScore(subjectMaxScoreMap, row.subject_id, exam.max_score);
+      const gradeScore = normalizeSubjectScoreForGrading(row.score, subjectMaxScore);
+      const gradeInfo = getGrade(gradeScore, subjectGrading.gradingSystem, subjectGrading.customCriteria);
       const pointBased = isSubjectPointBased(subjectGrading);
       return {
         ...row,
+        subject_max_score: subjectMaxScore,
         grading_system: subjectGrading.gradingSystem,
         point_based: pointBased,
         grade: gradeInfo.grade,
@@ -171,6 +221,9 @@ export function calculateStudentResults(examId, studentId) {
     };
   }
 
+  const componentMaxScoreMap = exam.component_exam_id
+    ? loadExamSubjectMaxScores(exam.component_exam_id)
+    : new Map();
   const componentRows = db.prepare(`
     SELECT er.*, s.name as subject_name, s.code as subject_code
     FROM exam_results er
@@ -196,9 +249,25 @@ export function calculateStudentResults(examId, studentId) {
     }
     const currentScore = Number(current?.score ?? 0);
     const componentScore = Number(component?.score ?? 0);
+    const currentSubjectMax = getSubjectMaxScore(subjectMaxScoreMap, subjectId, currentExamMax);
+    const componentSubjectMax = getSubjectMaxScore(componentMaxScoreMap, subjectId, componentExamMax);
     const finalScore = Number(
-      (((componentScore / componentExamMax) * componentWeight) + ((currentScore / currentExamMax) * currentWeight)).toFixed(2)
+      (
+        ((componentScore / componentSubjectMax) * componentWeight)
+        + ((currentScore / currentSubjectMax) * currentWeight)
+      ).toFixed(2)
     );
+    if (isMidterm) {
+      results.push(buildMidtermResultRow({
+        subject_id: subjectId,
+        subject_name: current?.subject_name || component?.subject_name || '',
+        subject_code: current?.subject_code || component?.subject_code || '',
+        current_score: currentScore,
+        component_score: componentScore,
+        subject_max_score: currentSubjectMax,
+      }, finalScore));
+      continue;
+    }
     const subjectGrading = resolveSubjectGrading(profileMap, subjectId, exam.grading_system);
     const gradeInfo = getGrade(finalScore, subjectGrading.gradingSystem, subjectGrading.customCriteria);
     const pointBased = isSubjectPointBased(subjectGrading);
@@ -210,6 +279,7 @@ export function calculateStudentResults(examId, studentId) {
       score: finalScore,
       current_score: currentScore,
       component_score: componentScore,
+      subject_max_score: currentSubjectMax,
       grading_system: subjectGrading.gradingSystem,
       point_based: pointBased,
       grade: gradeInfo.grade,

@@ -218,6 +218,17 @@ CREATE TABLE IF NOT EXISTS exam_subject_grading_profiles (
   FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS exam_subject_max_scores (
+  exam_id VARCHAR(64) NOT NULL,
+  subject_id VARCHAR(64) NOT NULL,
+  max_score DOUBLE NOT NULL,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (exam_id, subject_id),
+  KEY idx_exam_subject_max_scores_exam (exam_id),
+  FOREIGN KEY (exam_id) REFERENCES exams(id) ON DELETE CASCADE,
+  FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS exam_merge_sources (
   exam_id VARCHAR(64) NOT NULL,
   source_exam_id VARCHAR(64) NOT NULL,

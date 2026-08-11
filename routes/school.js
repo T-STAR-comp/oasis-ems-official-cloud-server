@@ -3,7 +3,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import db, { getContextSchoolId, resetEducationData, runWithSchoolContext } from '../db/database.js';
+import db, { getContextSchoolId, runWithSchoolContext } from '../db/database.js';
 import { authenticateToken, getAssignedClassIds, isAdminUser, requireRole } from '../middleware/auth.js';
 import { getGradingSystemsForCountry, isSupportedGradingSystem, normalizeCountry, SUPPORTED_COUNTRIES } from '../utils/education.js';
 import { DEFAULT_REPORT_CARD_DESIGN, normalizeReportCardDesign } from '../utils/reportCardDesign.js';
@@ -33,11 +33,10 @@ function getSchoolCountry() {
 }
 
 function getUnavailableGradingMessage(system) {
-  const country = getSchoolCountry();
-  if (system === 'msce' && country === 'Nigeria') {
-    return 'MSCE grading is not available for Nigerian schools.';
+  if (!isSupportedGradingSystem(system)) {
+    return 'Unsupported grading system.';
   }
-  return `${system} grading is not available for ${country}.`;
+  return `${system} grading is not available for this school.`;
 }
 
 function ensureAllowedGradingSystem(system, res) {
@@ -459,19 +458,6 @@ router.put('/grading', authenticateToken, requireRole('admin', 'secretary'), (re
   }
 });
 
-// Switch country (admin only) - wipes all data and resets defaults
-router.post('/switch-country', authenticateToken, requireRole('admin'), (req, res) => {
-  const nextCountry = normalizeCountry(req.body?.country);
-  if (!SUPPORTED_COUNTRIES.includes(nextCountry)) {
-    return res.status(400).json({ error: 'Unsupported country' });
-  }
-
-  const result = resetEducationData(nextCountry);
-  const schoolInfo = db.prepare('SELECT * FROM school_info WHERE id = 1').get();
-  return res.json({
-    message: `Country switched to ${result.country}. Data reset completed.`,
-    school: schoolInfo,
-  });
-});
+// Switch country removed — Oasis EMS is Malawi-only.
 
 export default router;

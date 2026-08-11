@@ -71,6 +71,13 @@ export function exportClassData(classId) {
     `).all(...examIds)
     : [];
 
+  const examSubjectMaxScores = examIds.length
+    ? db.prepare(`
+      SELECT * FROM exam_subject_max_scores
+      WHERE exam_id IN (${examIds.map(() => '?').join(',')})
+    `).all(...examIds)
+    : [];
+
   const examMergeSources = examIds.length
     ? db.prepare(`
       SELECT * FROM exam_merge_sources
@@ -87,7 +94,7 @@ export function exportClassData(classId) {
   const attendanceRecords = db.prepare('SELECT * FROM attendance_records WHERE class_id = ?').all(classId);
 
   return {
-    schema_version: '1.0',
+    schema_version: '1.1',
     exported_at: new Date().toISOString(),
     source_class_id: classId,
     data: {
@@ -98,6 +105,7 @@ export function exportClassData(classId) {
       exams,
       exam_results: examResults,
       exam_subject_grading_profiles: examSubjectProfiles,
+      exam_subject_max_scores: examSubjectMaxScores,
       exam_merge_sources: examMergeSources,
       promotion_criteria: promotionCriteria,
       promotion_actions: promotionActions,
@@ -144,6 +152,7 @@ export function importClassData(payload) {
       'student_subjects',
       'exams',
       'exam_subject_grading_profiles',
+      'exam_subject_max_scores',
       'exam_merge_sources',
       'exam_results',
       'promotion_criteria',
