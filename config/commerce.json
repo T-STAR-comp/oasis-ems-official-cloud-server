@@ -1,0 +1,29 @@
+{
+  "_readme": "Edit plans (prices) and activation_codes here. type: trial | manual. Restart not required — changes reload when the file is saved.",
+  "currency": "MWK",
+  "plans": [
+    {
+      "id": "online-annual",
+      "name": "Online Annual",
+      "duration_months": 12,
+      "amount": 150000,
+      "access_mode": "online"
+    },
+    {
+      "id": "offline-annual",
+      "name": "Offline Annual",
+      "duration_months": 12,
+      "amount": 100000,
+      "access_mode": "offline"
+    }
+  ],
+  "activation_codes": [
+    {
+      "code": "OASIS-EMS-LIN-26-26",
+      "type": "trial",
+      "label": "Free Trial",
+      "duration_days": 365,
+      "online_features": true
+    }
+  ]
+}

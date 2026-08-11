@@ -6,10 +6,13 @@ import {
   DIGITAL_SUBSCRIPTION_DURATION_DAYS,
   TRIAL_ACTIVATION_CODE,
   TRIAL_DURATION_DAYS,
+  buildActivationPayloadFromCode,
   calculateExpiryUnix,
+  findActivationCode,
   getDigitalMethodMeta,
   getFallbackDigitalSubscriptionCatalog,
   isDigitalMethodAllowed,
+  isTrialActivationCode,
   normalizeRemoteDigitalPlans,
   normalizeSubscriptionCountry,
   splitFullName,
@@ -293,7 +296,18 @@ function findCatalogPlan(catalog, requestedPlanId) {
 
 async function fetchDigitalPlansCatalog(country, logContext = {}) {
   const normalizedCountry = normalizeSubscriptionCountry(country);
-  const fallback = getFallbackDigitalSubscriptionCatalog(normalizedCountry);
+  const localCatalog = getFallbackDigitalSubscriptionCatalog(normalizedCountry);
+  if (localCatalog.plans.length) {
+    logPaymentEvent('digital.plans.local_config', {
+      ...logContext,
+      country: normalizedCountry,
+      source: localCatalog.source,
+      plan_count: localCatalog.plans.length,
+    });
+    return localCatalog;
+  }
+
+  const fallback = localCatalog;
   if (!PLANS_SERVER_URL) {
     logPaymentEvent('digital.plans.no_server_url', {
       ...logContext,
@@ -804,7 +818,7 @@ router.post('/trial/activate', async (req, res) => {
     }
 
     const activationKey = String(req.body?.activation_key || '').trim();
-    if (activationKey !== TRIAL_ACTIVATION_CODE) {
+    if (!isTrialActivationCode(activationKey)) {
       return res.status(400).json({ error: 'Invalid trial activation code.' });
     }
 
@@ -813,6 +827,9 @@ router.post('/trial/activate', async (req, res) => {
     const schoolEmail = String(req.body?.school_email || '').trim().toLowerCase();
     const internalUid = String(req.body?.internal_uid || '').trim();
     const machineHash = String(req.body?.machine_hash || '').trim();
+    const trialEntry = findActivationCode(activationKey);
+    const trialDurationDays = trialEntry?.duration_days || TRIAL_DURATION_DAYS;
+    const trialLabel = trialEntry?.label || 'Free Trial';
 
     const result = await runWithSchoolContext(schoolId, async () => {
       syncSchoolInfo({ schoolId, country, schoolName, schoolEmail });
@@ -832,10 +849,10 @@ router.post('/trial/activate', async (req, res) => {
         if (sameInternalUid && expiresAt > now) {
           return {
             issuer: 'oasis-cloud-trial',
-            code: TRIAL_ACTIVATION_CODE,
-            label: 'Free Trial',
+            code: activationKey,
+            label: trialLabel,
             school_id: schoolId,
-            duration_days: existing.duration_days || TRIAL_DURATION_DAYS,
+            duration_days: existing.duration_days || trialDurationDays,
             issued_at: Math.floor(new Date(existing.activated_at || Date.now()).getTime() / 1000),
             expires_at: expiresAt,
           };
@@ -844,7 +861,7 @@ router.post('/trial/activate', async (req, res) => {
       }
 
       const issuedAt = now;
-      const expiresAt = calculateExpiryUnix(TRIAL_DURATION_DAYS, issuedAt);
+      const expiresAt = calculateExpiryUnix(trialDurationDays, issuedAt);
       insertSubscriptionRecord({
         schoolId,
         country,
@@ -852,10 +869,10 @@ router.post('/trial/activate', async (req, res) => {
         adminName: schoolName,
         planKind: 'trial',
         status: 'active',
-        activationCode: TRIAL_ACTIVATION_CODE,
+        activationCode: activationKey,
         paymentMethod: 'trial',
         paymentChannel: 'trial',
-        durationDays: TRIAL_DURATION_DAYS,
+        durationDays: trialDurationDays,
         onlineFeaturesEnabled: true,
         internalUid,
         machineHash,
@@ -869,10 +886,10 @@ router.post('/trial/activate', async (req, res) => {
 
       return {
         issuer: 'oasis-cloud-trial',
-        code: TRIAL_ACTIVATION_CODE,
-        label: 'Free Trial',
+        code: activationKey,
+        label: trialLabel,
         school_id: schoolId,
-        duration_days: TRIAL_DURATION_DAYS,
+        duration_days: trialDurationDays,
         issued_at: issuedAt,
         expires_at: expiresAt,
       };
@@ -901,6 +918,54 @@ router.post('/manual/activate', async (req, res) => {
     const country = normalizeSubscriptionCountry(req.body?.country);
     const schoolName = String(req.body?.school_name || '').trim();
     const schoolEmail = String(req.body?.school_email || '').trim().toLowerCase();
+    const localActivation = buildActivationPayloadFromCode(activationKey);
+
+    if (localActivation?.plan_kind === 'manual_offline') {
+      if (!schoolId) {
+        return res.json({
+          ...localActivation,
+          activation_server_url: 'local-commerce-config',
+          plan_kind: 'manual_offline',
+          online_features_enabled: false,
+        });
+      }
+
+      const result = await runWithSchoolContext(schoolId, async () => {
+        syncSchoolInfo({ schoolId, country, schoolName, schoolEmail });
+
+        insertSubscriptionRecord({
+          schoolId,
+          country,
+          adminEmail: schoolEmail,
+          adminName: schoolName,
+          planKind: 'manual_offline',
+          status: 'active',
+          activationCode: String(localActivation.code || activationKey).trim(),
+          paymentMethod: 'activation_code',
+          paymentChannel: 'manual',
+          durationDays: Number(localActivation.duration_days || 0),
+          onlineFeaturesEnabled: false,
+          machineHash,
+          metadata: {
+            app: String(req.body?.app || '').trim() || 'oasis-ems',
+            version: String(req.body?.version || '').trim() || 'desktop',
+            activation_server_url: 'local-commerce-config',
+          },
+          activatedAt: unixToIso(localActivation.issued_at),
+          expiresAt: unixToIso(localActivation.expires_at),
+        });
+
+        return {
+          ...localActivation,
+          activation_server_url: 'local-commerce-config',
+          plan_kind: 'manual_offline',
+          online_features_enabled: false,
+        };
+      }, { allowCreate: true });
+
+      return res.json(result);
+    }
+
     assertLegacyLicenseServerConfigured();
     const activation = await postJson(`${LICENSE_SERVER_URL}/activate`, {
       machine_hash: machineHash,
